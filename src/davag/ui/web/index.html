@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0b0e14" />
+    <title>davag — DaVinci Resolve AI Agent</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/app.css" />
+  </head>
+  <body>
+    <div id="gate" class="gate">
+      <form id="gate-form" class="gate-card">
+        <div class="brand-row">
+          <img src="/favicon.svg" width="32" height="32" alt="" />
+          <h1>davag</h1>
+        </div>
+        <p class="muted">Paste the session bearer token printed in the terminal banner.</p>
+        <input id="gate-token" type="password" placeholder="session token" autocomplete="off" spellcheck="false" />
+        <button type="submit" class="btn primary">Connect to Session</button>
+        <p id="gate-error" class="error"></p>
+      </form>
+    </div>
+
+    <div id="app" class="app-shell" hidden>
+      <header class="topbar">
+        <span class="dot" id="conn-dot" title="SSE disconnected"></span>
+        <strong id="hdr-model">—</strong>
+        <span class="badge" id="hdr-resolve">resolve: —</span>
+        <span class="badge danger" id="hdr-yolo" hidden>yolo</span>
+        <button id="btn-copy-url" class="btn small" title="Copy tokenized share URL">🔗 Copy URL</button>
+        <button id="btn-copy-tok" class="btn small" title="Copy bearer token">🔑 Copy Token</button>
+        <span class="spacer"></span>
+        <span class="muted" id="hdr-stats">0t · $0.0000</span>
+        <canvas id="hdr-spark" width="84" height="18" title="tok/s sparkline"></canvas>
+        <nav class="tabs">
+          <button class="tab active" data-tab="chat">chat</button>
+          <button class="tab" data-tab="resolve">resolve</button>
+          <button class="tab" data-tab="context">context</button>
+          <button class="tab" data-tab="perf">perf</button>
+          <button class="tab" data-tab="models">models & keys</button>
+          <button class="tab" data-tab="artifacts">artifacts</button>
+        </nav>
+      </header>
+
+      <main class="views">
+        <!-- CHAT VIEW -->
+        <section id="view-chat" class="view chat-layout">
+          <div class="resolve-strip" id="resolve-strip">
+            <span id="strip-summary" class="muted">DaVinci Resolve: checking…</span>
+            <span class="spacer"></span>
+            <button id="btn-grab-frame" class="btn small" title="Export current Resolve viewer frame & attach to LLM context">📸 Grab Frame</button>
+            <button id="btn-undo-tl" class="btn small" title="Restore previous .davag-snap timeline checkpoint">↩ Undo Cut</button>
+          </div>
+          <div id="viewer-drawer" class="viewer-drawer" hidden>
+            <img id="viewer-img" alt="Resolve Viewer / Contact Sheet" hidden />
+            <video id="viewer-video" controls preload="metadata" hidden></video>
+            <div class="viewer-meta">
+              <span id="viewer-tc" class="muted"></span>
+              <button id="viewer-close" class="btn small">hide</button>
+            </div>
+          </div>
+
+          <div id="scroll" class="transcript-scroll">
+            <div id="transcript"></div>
+            <div id="live-thinking" class="entry thinking" hidden></div>
+            <div id="live-text" class="entry assistant" hidden></div>
+            <div id="live-status" class="status-pill" hidden></div>
+          </div>
+
+          <!-- Raced Approval Banner -->
+          <div id="approval-box" class="approval-box" hidden>
+            <div class="approval-title">▲ Gated operation requires approval <span id="ap-id" class="muted"></span></div>
+            <pre id="ap-detail" class="ap-code"></pre>
+            <div class="approval-actions">
+              <button id="ap-allow" class="btn primary">Allow (y)</button>
+              <button id="ap-checkpoint" class="btn">Checkpoint Timeline & Allow</button>
+              <button id="ap-deny" class="btn danger">Deny (n)</button>
+            </div>
+          </div>
+
+          <form id="composer-form" class="composer">
+            <div id="cmd-suggest" class="cmd-suggest" hidden></div>
+            <textarea id="composer-input" rows="2" placeholder="Ask davag to inspect clips, cut dead air, add markers, or grade… (/ for commands, @file to attach)"></textarea>
+            <div class="composer-btns">
+              <button type="submit" id="btn-send" class="btn primary">Send</button>
+              <button type="button" id="btn-cancel" class="btn danger" hidden>Cancel (Esc)</button>
+            </div>
+          </form>
+        </section>
+
+        <!-- RESOLVE INSPECTOR VIEW -->
+        <section id="view-resolve" class="view pad" hidden>
+          <div class="row-between">
+            <h2>DaVinci Resolve Session Inspector</h2>
+            <div>
+              <button id="btn-res-refresh" class="btn small">Refresh</button>
+              <button id="btn-res-direct" class="btn small">Reconnect Direct</button>
+              <button id="btn-res-bridge" class="btn small">Reconnect Bridge</button>
+            </div>
+          </div>
+          <div id="resolve-inspector" class="grid-two"></div>
+        </section>
+
+        <!-- CONTEXT & PROMPTS VIEW -->
+        <section id="view-context" class="view pad" hidden>
+          <div class="row-between">
+            <h2>Context Ledger & System Prompt</h2>
+            <div class="row-gap">
+              <button id="btn-toggle-sys" class="btn small">Inspect Full System Prefix</button>
+              <button id="btn-ctx-compact" class="btn small">Compact Now</button>
+            </div>
+          </div>
+          <div id="ctx-summary" class="muted"></div>
+          <div class="meter-track"><div id="ctx-bar" class="meter-fill"></div></div>
+          <pre id="ctx-sys-preview" class="ap-code" hidden></pre>
+
+          <div class="card" style="margin-bottom: 16px;">
+            <div class="row-between">
+              <strong>Editable Prompts & `dr_ops` Tool Protocol (`./.prompts/`)</strong>
+              <div class="row-gap">
+                <select id="sel-prompt-key"></select>
+                <button id="btn-prompt-save" class="btn small">Save to ./.prompts/</button>
+                <button id="btn-prompt-revert" class="btn small">Revert to Built-in</button>
+                <button id="btn-prompt-apply" class="btn primary small" title="Rebuilds cached system prefix (resets prompt cache)">Apply Live</button>
+              </div>
+            </div>
+            <span id="prompt-meta" class="muted"></span>
+            <textarea id="inp-prompt-body" rows="8" style="width:100%; background:#090c11; color:#e4e8f1; border:1px solid #232b3d; border-radius:5px; padding:8px; font:inherit;"></textarea>
+          </div>
+
+          <table class="data-table" id="ctx-table"></table>
+        </section>
+
+        <!-- PERF VIEW -->
+        <section id="view-perf" class="view pad" hidden>
+          <h2>Throughput & TTFT Telemetry</h2>
+          <canvas id="perf-canvas" width="820" height="220" class="perf-canvas"></canvas>
+          <table class="data-table" id="perf-table"></table>
+        </section>
+
+        <!-- MODELS & KEYS VIEW -->
+        <section id="view-models" class="view pad" hidden>
+          <div class="grid-two">
+            <div class="card">
+              <h3>Model & Effort</h3>
+              <label>Provider <select id="sel-provider"></select></label>
+              <label>Model <select id="sel-model"></select></label>
+              <label>Custom Model Slug <input id="inp-custom-model" placeholder="optional override slug" /></label>
+              <label>Effort <select id="sel-effort"></select></label>
+              <label class="inline"><input type="checkbox" id="chk-persist-model" /> Remember in settings.json</label>
+              <button id="btn-apply-model" class="btn primary">Switch Model</button>
+            </div>
+
+            <div class="card">
+              <h3>API Keys & `#---#` .env Profiles</h3>
+              <div id="keys-list" class="stack"></div>
+              <hr />
+              <div class="row-gap">
+                <select id="sel-key-prov">
+                  <option value="anthropic">anthropic</option>
+                  <option value="gemini">gemini</option>
+                  <option value="openai">openai</option>
+                  <option value="openrouter">openrouter</option>
+                  <option value="grok">grok</option>
+                </select>
+                <input id="inp-api-key" type="password" placeholder="paste API key" />
+                <label class="inline"><input type="checkbox" id="chk-save-key" checked /> Save</label>
+                <button id="btn-save-key" class="btn small">Set Key</button>
+              </div>
+              <hr />
+              <h4>`.env` Provider Blocks</h4>
+              <div id="env-blocks-list" class="stack"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ARTIFACTS VIEW -->
+        <section id="view-artifacts" class="view pad" hidden>
+          <h2>Session Artifacts</h2>
+          <div id="artifacts-list" class="stack"></div>
+          <pre id="artifact-preview" class="ap-code" hidden></pre>
+        </section>
+      </main>
+    </div>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
