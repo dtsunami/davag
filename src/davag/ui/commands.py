@@ -31,7 +31,13 @@ HELP_TEXT = """Commands
   /grab [tc]                  grab current Resolve viewer frame & attach image to context
   /sheet <clip|path> [s dur]  build burned-in-TC contact sheet PNG & attach to vision context
   /index [clip|path]          run fast Scout LLM (`gemini-3.8-flash`) to index clip & cache Digest
-  /proxy <clip|path>          build smooth 720p QSV editing proxy & link in DaVinci Resolve
+  /proxy <clip|path> [h kbps] build QSV editing proxy (`360|540|720|1080`, optional kbps) & link in Resolve
+  /transcribe <clip> [s dur]  extract frame-mapped transcript (Gemini Audio / Whisper) & attach to context
+  /vo [prefix]                convert timeline markers to Fairlight ADR `.csv` + on-screen `.srt` teleprompter
+  /role [name]                view or switch capability surface (`reviewer|logger|editor|finisher|master`)
+  /thumbnail <prompt>         generate 16:9 YouTube thumbnail via OpenRouter Flux (+ current viewer frame)
+  /youtube-stage <title>      stage YouTube release bundle (chapters, `.srt`, `DESCRIPTION.md`, render queue)
+  /youtube-auth [json_path]   run one-time Google OAuth browser flow & save `~/.davag/youtube_token.json`
   /watch <clip|path> [s dur]  transcode QSV/NVENC review video & attach for Gemini review
   /undo                       restore active Resolve timeline from most recent `.davag-snap` checkpoint
   /image <path>               attach a workspace image to context
@@ -373,33 +379,209 @@ async def handle_command(
 
     if cmd == "/proxy":
         if not args:
-            push({"type": "notice", "message": "usage: /proxy <clip_id|clip_name|path>"})
+            push({"type": "notice", "message": "usage: /proxy <clip_id|clip_name|path> [height: 360|540|720|1080] [kbps]"})
             return {"handled": True}
         try:
             from davag.media_intel.ffmpeg import generate_editing_proxy
 
             src_path, cid = await _resolve_clip_or_path(args[0])
-            push({"type": "notice", "message": f"Transcoding 720p short-GOP editing proxy for {src_path.name}…"})
+            height = int(args[1]) if len(args) >= 2 else 720
+            default_kbps = {360: 700, 480: 1200, 540: 1800, 720: 3500, 1080: 6000}.get(height, 3500)
+            kbps = int(args[2]) if len(args) >= 3 else default_kbps
+            push({"type": "notice", "message": f"Transcoding {height}p ({kbps} kbps) QSV editing proxy for {src_path.name}…"})
             proxy_dir = session.cfg.home / "cache" / "resolve_proxies"
             proxy_dir.mkdir(parents=True, exist_ok=True)
-            out_file = proxy_dir / f"{src_path.stem}_720p_proxy.mp4"
-            res = await asyncio.to_thread(generate_editing_proxy, src_path, output_path=out_file)
+            out_file = proxy_dir / f"{src_path.stem}_{height}p_proxy.mp4"
+            res = await asyncio.to_thread(
+                generate_editing_proxy, src_path, output_path=out_file, height=height, video_kbps=kbps
+            )
             linked = False
-            if cid and session.transport is not None:
+            if cid and session.transport is not None and "--no-link" not in args:
                 l_res = await session.transport.call("mediapool.link_proxy", {"clip_id": cid, "proxy_path": res["path"]})
                 linked = bool(l_res.get("linked"))
-            session.bus.publish("media-preview", {"kind": "video", "path": res["path"], "title": f"Proxy: {src_path.name}"})
+            session.bus.publish("media-preview", {"kind": "video", "path": res["path"], "title": f"Proxy ({height}p): {src_path.name}"})
             push(
                 {
                     "type": "notice",
                     "message": (
-                        f"Generated 720p proxy via {res['encoder']} ({res['bytes'] / (1024*1024):.1f} MB) -> {res['path']}"
+                        f"Generated {height}p proxy via {res['encoder']} ({res['bytes'] / (1024*1024):.1f} MB) -> {res['path']}"
                         + (" [Linked in DaVinci Resolve!]" if linked else "")
                     ),
                 }
             )
         except Exception as err:  # noqa: BLE001
             push({"type": "warning", "message": f"/proxy failed: {err}"})
+        return {"handled": True}
+
+    if cmd == "/transcribe":
+        if not args:
+            push({"type": "notice", "message": "usage: /transcribe <clip_id|clip_name|path> [start_sec] [duration_sec]"})
+            return {"handled": True}
+        try:
+            from davag.media_intel.transcribe import transcribe_media
+
+            src_path, cid = await _resolve_clip_or_path(args[0])
+            s_sec = float(args[1]) if len(args) >= 2 else None
+            d_sec = float(args[2]) if len(args) >= 3 else None
+            push({"type": "notice", "message": f"Transcribing {src_path.name}…"})
+            tr_res = await transcribe_media(
+                src_path,
+                cache_dir=session.cfg.home / "cache" / "transcripts",
+                gemini_api_key=session.cfg.keys.get("gemini"),
+                openai_api_key=session.cfg.keys.get("openai"),
+                start_sec=s_sec,
+                duration_sec=d_sec,
+            )
+            lines_txt = "\n".join(
+                f"[{s['start_tc']} f{s['start_frame']}..{s['end_frame']}] {s['text']}"
+                for s in (tr_res.get("segments") or [])[:120]
+            )
+            session.ledger.add(
+                seg_type="op-result",
+                label=f"Transcript: {src_path.name} ({tr_res['segment_count']} segs)",
+                role="user",
+                text=f"[Transcript for {src_path.name} (clip_id={cid}, backend={tr_res['backend']})]\n{lines_txt}",
+            )
+            push(
+                {
+                    "type": "info",
+                    "text": f"Transcript ({tr_res['backend']}, {tr_res['segment_count']} segments — attached to context):\n\n{lines_txt[:4000]}",
+                }
+            )
+        except Exception as err:  # noqa: BLE001
+            push({"type": "warning", "message": f"/transcribe failed: {err}"})
+        return {"handled": True}
+
+    if cmd == "/vo":
+        if session.transport is None:
+            push({"type": "warning", "message": "DaVinci Resolve is not connected (`/resolve` first)."})
+            return {"handled": True}
+        try:
+            prefix = args[0] if args else "vo_teleprompter"
+            out_dir = str(session.cfg.cwd / "vo_scripts")
+            res = await session.transport.call(
+                "timeline.vo_script",
+                {"output_dir": out_dir, "prefix": prefix, "import_srt_track": "--no-srt" not in args},
+            )
+            cues_preview = "\n".join(
+                f"  #{b['cue']:02d} [{b['in_tc']} -> {b['out_tc']} · {b['duration_sec']}s · ~{b['recommended_words']}w]\n      {b['script']}"
+                for b in res["beats"]
+            )
+            msg = (
+                f"Built Voiceover Teleprompter for '{res['timeline']}' ({res['beat_count']} beats):\n"
+                f"  • On-Screen Subtitle Track: {'IMPORTED onto ST1 (VO Teleprompter)!' if res['imported_onto_timeline'] else res['resolve_srt']}\n"
+                f"  • Fairlight ADR Cue List:   {res['fairlight_adr_csv']}\n"
+                f"    (In Resolve: Fairlight -> ADR panel -> Setup -> Import Cue List -> select CSV for countdown streamer!)\n"
+                f"  • Live Web Teleprompter:    open Web GUI -> click `🎙 prompter` tab!\n\n"
+                f"{cues_preview}"
+            )
+            push({"type": "info", "text": msg})
+        except Exception as err:  # noqa: BLE001
+            push({"type": "warning", "message": f"/vo failed: {err}"})
+        return {"handled": True}
+
+    if cmd == "/role":
+        from davag.agent.roles import ROLE_SPECS, ROLES
+        from davag.session.promptedit import apply_staged_prompts
+
+        if not args:
+            lines = ["Capability Roles (`/role <name>`):"]
+            for r_key in ROLES:
+                rs = ROLE_SPECS[r_key]
+                cur = "  <-- active" if session.cfg.role == r_key else ""
+                lines.append(f"  • {r_key:<10} — {rs.title}: {rs.summary}{cur}")
+            push({"type": "info", "text": "\n".join(lines)})
+            return {"handled": True}
+
+        target_role = args[0].strip().lower()
+        if target_role not in ROLES:
+            push({"type": "warning", "message": f"Unknown role '{target_role}'. Choose one of: {', '.join(ROLES)}"})
+            return {"handled": True}
+        session.cfg.role = target_role
+        reb = apply_staged_prompts(session)
+        session.bus.publish("config-changed", {"role": target_role})
+        rs = ROLE_SPECS[target_role]
+        push(
+            {
+                "type": "notice",
+                "message": f"Switched active role -> {target_role} ({rs.title}; system prompt {reb['after_tokens']:,} tok)",
+            }
+        )
+        return {"handled": True}
+
+    if cmd == "/thumbnail":
+        if not args:
+            push({"type": "notice", "message": "usage: /thumbnail <prompt>  (uses current Resolve viewer frame as reference if connected!)"})
+            return {"handled": True}
+        try:
+            from davag.youtube.studio import generate_youtube_thumbnail
+
+            prompt_txt = " ".join(args)
+            refs: list[Path] = []
+            if session.transport is not None:
+                with contextlib.suppress(Exception):
+                    grab = await session.transport.call("timeline.grab_still", {"attach_to_context": False})
+                    refs.append(Path(str(grab["path"])))
+            out_png = session.cfg.cwd / "youtube_staging" / "thumbnail.png"
+            push({"type": "notice", "message": f"Generating 16:9 thumbnail via OpenRouter ({session.cfg.image_model})…"})
+            th = await generate_youtube_thumbnail(
+                prompt=prompt_txt, output_path=out_png, cfg=session.cfg, reference_images=refs
+            )
+            if session.cfg.model.vision:
+                session.ledger.add(seg_type="media", label="YouTube Thumbnail", role="user", image=load_image_part(th["path"]))
+            session.bus.publish("media-preview", {"kind": "image", "path": th["path"], "title": f"Thumbnail ({th['model']})"})
+            push({"type": "notice", "message": f"Saved thumbnail ({th['bytes']//1024} KB) -> {th['path']}"})
+        except Exception as err:  # noqa: BLE001
+            push({"type": "warning", "message": f"/thumbnail failed: {err}"})
+        return {"handled": True}
+
+    if cmd == "/youtube-stage":
+        if session.transport is None:
+            push({"type": "warning", "message": "DaVinci Resolve is not connected."})
+            return {"handled": True}
+        if not args:
+            push({"type": "notice", "message": "usage: /youtube-stage <Video Title>"})
+            return {"handled": True}
+        try:
+            from davag.youtube.studio import stage_youtube_package
+
+            title = " ".join(args)
+            pkg = await stage_youtube_package(
+                transport=session.transport,
+                staging_root=session.cfg.cwd / "youtube_staging",
+                title=title,
+            )
+            push(
+                {
+                    "type": "info",
+                    "text": (
+                        f"Staged YouTube release '{pkg['title']}' in {pkg['staging_dir']}:\n"
+                        f"  • Manifest:    {pkg['manifest_path']}\n"
+                        f"  • Description: {pkg['description_path']} ({len(pkg['chapters'])} chapters)\n"
+                        f"  • Captions:    {pkg['captions_srt']}\n"
+                        f"  • Render Job:  {pkg['render_job_id']} -> {pkg['video_path']}"
+                    ),
+                }
+            )
+        except Exception as err:  # noqa: BLE001
+            push({"type": "warning", "message": f"/youtube-stage failed: {err}"})
+        return {"handled": True}
+
+    if cmd == "/youtube-auth":
+        try:
+            from davag.youtube.studio import run_youtube_oauth_flow
+
+            secret_arg = Path(" ".join(args).strip(' "\'')) if args else None
+            push({"type": "notice", "message": "Opening browser for Google YouTube OAuth2 consent…"})
+            saved = await run_youtube_oauth_flow(home=session.cfg.home, client_secret_path=secret_arg)
+            push(
+                {
+                    "type": "notice",
+                    "message": f"Saved YouTube OAuth refresh_token -> {saved['token_path']} (ready for youtube.upload!)",
+                }
+            )
+        except Exception as err:  # noqa: BLE001
+            push({"type": "warning", "message": f"/youtube-auth failed: {err}"})
         return {"handled": True}
 
     if cmd == "/watch":

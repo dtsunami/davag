@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from davag.media_intel import (
     extract_proxy_clip,
     generate_contact_sheet,
     generate_editing_proxy,
+    master_voiceover_audio,
     probe_media,
     save_clip_digest,
 )
@@ -53,6 +55,11 @@ MEDIA_OPS = (
     "media.analyze_clip",
     "media.save_digest",
     "media.transcribe",
+    "media.master_vo",
+    "motion.render_overlay",
+    "motion.qr_callout",
+    "youtube.thumbnail",
+    "youtube.stage",
     "otio.build",
 )
 GATED_TIERS = ("eval", "destructive")
@@ -125,15 +132,34 @@ def plan_batch(
     sandbox: Sandbox,
     has_transport: bool,
     resolve_media_paths: set[Path] | None = None,
+    role: str = "master",
 ) -> list[dict[str, Any]]:
+    from .roles import is_op_allowed_for_role
+
     errors: list[dict[str, Any]] = []
     allowed_media = resolve_media_paths or set()
 
     for call in ops:
+        spec = get_op(call.op)
+        if not is_op_allowed_for_role(role, call.op, spec.tier if spec else None):
+            errors.append(
+                {
+                    "index": call.index,
+                    "op": call.op,
+                    "message": f'op "{call.op}" is not permitted under active role "{role}" (switch via `/role master`)',
+                }
+            )
+            continue
+
         try:
             if call.op == "shell":
                 if not str(call.params.get("cmd", "")).strip():
                     errors.append({"index": call.index, "op": call.op, "message": "shell requires 'cmd'"})
+            elif call.op in ("youtube.upload", "youtube.update"):
+                if not call.params.get("manifest_path"):
+                    errors.append({"index": call.index, "op": call.op, "message": "youtube.upload requires 'manifest_path'"})
+                else:
+                    sandbox.resolve_for_read(str(call.params["manifest_path"]))
             elif call.op in FS_OPS:
                 err = _plan_fs_op(call, sandbox)
                 if err:
@@ -151,6 +177,22 @@ def plan_batch(
                         )
                     else:
                         sandbox.resolve_for_write(str(p["output_path"]))
+                elif call.op == "motion.qr_callout":
+                    if not p.get("url"):
+                        errors.append({"index": call.index, "op": call.op, "message": "motion.qr_callout requires 'url'"})
+                elif call.op == "motion.render_overlay":
+                    if not p.get("html") and not p.get("path"):
+                        errors.append(
+                            {"index": call.index, "op": call.op, "message": "motion.render_overlay requires 'html' (or 'path')"}
+                        )
+                elif call.op == "youtube.thumbnail":
+                    if not p.get("prompt"):
+                        errors.append({"index": call.index, "op": call.op, "message": "youtube.thumbnail requires 'prompt'"})
+                elif call.op == "youtube.stage":
+                    if not has_transport:
+                        errors.append({"index": call.index, "op": call.op, "message": "youtube.stage requires DaVinci Resolve"})
+                    elif not p.get("title"):
+                        errors.append({"index": call.index, "op": call.op, "message": "youtube.stage requires 'title'"})
                 elif call.op == "media.save_digest" and not p.get("summary"):
                     errors.append({"index": call.index, "op": call.op, "message": "media.save_digest requires 'summary'"})
                 elif p.get("clip_id") or p.get("clip_name"):
@@ -247,17 +289,21 @@ def _exec_fs_op(call: OpCall, sandbox: Sandbox, journal: Journal) -> tuple[FileE
         target = sandbox.resolve_for_read(str(p["path"]))
         lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         line_range = p.get("lines")
+        if isinstance(line_range, str) and "-" in line_range:
+            parts = line_range.split("-", 1)
+            if parts[0].strip().isdigit() and parts[1].strip().isdigit():
+                line_range = [int(parts[0].strip()), int(parts[1].strip())]
         if isinstance(line_range, list) and len(line_range) == 2:
             lo = max(1, int(line_range[0]))
             hi = min(len(lines), int(line_range[1]))
-            sliced = lines[lo - 1 : hi]
         else:
-            lo, hi = 1, len(lines)
-            sliced = lines
+            lo, hi = 1, min(len(lines), 400)
+        sliced = lines[lo - 1 : hi]
         return None, {
             "path": sandbox.rel(target),
             "lines": [lo, hi],
             "total_lines": len(lines),
+            "truncated": hi < len(lines) and line_range is None,
             "text": "\n".join(sliced),
         }
 
@@ -351,6 +397,216 @@ async def _exec_media_op(
             video_segments=v_segs,
             audio_segments=a_segs,
             output_path=out_p,
+        )
+
+    if call.op == "motion.qr_callout":
+        from davag.youtube.qr import build_qr_callout_html
+
+        title_txt = str(p.get("title") or "Explore the Code & Demo")
+        url_txt = str(p["url"]).strip()
+        qr_html = build_qr_callout_html(
+            title=title_txt,
+            url=url_txt,
+            kicker=str(p.get("kicker") or "SCAN OR CLICK LINK IN DESCRIPTION"),
+            position=str(p.get("position") or "bottom-right"),
+            accent=str(p.get("accent") or "#4cc9f0"),
+        )
+        if transport is not None and p.get("record_tc") and bool(p.get("add_marker", True)):
+            with contextlib.suppress(Exception):
+                await transport.call(
+                    "marker.add",
+                    {
+                        "tc": str(p["record_tc"]),
+                        "color": "Purple",
+                        "name": title_txt,
+                        "note": url_txt,
+                        "custom_data": "davag:link",
+                    },
+                )
+        delegated = OpCall(
+            index=call.index,
+            op="motion.render_overlay",
+            params={
+                "name": p.get("name") or f"qr_{re.sub(r'[^a-zA-Z0-9]+', '_', title_txt).strip('_').lower()[:28]}",
+                "html": qr_html,
+                "duration_sec": float(p.get("duration_sec", 6.5)),
+                "static": bool(p.get("static", False)),
+                **({"record_tc": p["record_tc"]} if p.get("record_tc") else {}),
+                **({"track_index": p["track_index"]} if p.get("track_index") is not None else {}),
+                **({"output_path": p["output_path"]} if p.get("output_path") else {}),
+            },
+        )
+        return await _exec_media_op(
+            delegated,
+            sandbox,
+            cache_dir=cache_dir,
+            cfg=cfg,
+            openai_api_key=openai_api_key,
+            transport=transport,
+            clip_map=clip_map,
+            allowed_media=allowed_media,
+        )
+
+    if call.op == "motion.render_overlay":
+        from davag.media_intel.motion import render_html_svg_overlay
+
+        html_src = str(p["html"]) if p.get("html") else sandbox.resolve_for_read(str(p["path"])).read_text(encoding="utf-8")
+        name_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(p.get("name") or "overlay")).strip("_") or "overlay"
+        out_default = sandbox.cwd / "overlays" / f"{name_slug}.mov"
+        out_p = sandbox.resolve_for_write(str(p["output_path"])) if p.get("output_path") else out_default
+
+        # Match open Resolve project FPS/resolution automatically unless overridden!
+        width = int(p.get("width", 1920))
+        height = int(p.get("height", 1080))
+        fps = float(p.get("fps", 30.0))
+        if transport is not None and ("width" not in p or "fps" not in p):
+            with contextlib.suppress(Exception):
+                st = await transport.call("resolve.status", timeout=2.0)
+                proj = st.get("project") or {}
+                if "width" not in p and proj.get("width"):
+                    width = int(proj["width"])
+                    height = int(proj["height"])
+                if "fps" not in p and proj.get("fps"):
+                    fps = float(proj["fps"])
+
+        with contextlib.suppress(OSError):
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            out_p.with_suffix(".html").write_text(html_src, encoding="utf-8")
+
+        res = await render_html_svg_overlay(
+            html_or_svg=html_src,
+            output_path=out_p,
+            width=width,
+            height=height,
+            fps=fps,
+            duration_sec=float(p.get("duration_sec", 4.0)),
+            static=bool(p.get("static", False)),
+        )
+
+        # Optionally import into Resolve `Overlays` bin & place onto an unobstructed Overlay Video track!
+        if transport is not None and (p.get("record_tc") or p.get("insert_on_timeline")):
+            from davag.resolve_ops.helpers import tc_to_frames
+
+            imp = await transport.call("mediapool.import", {"paths": [res["path"]], "bin_path": "Overlays"})
+            imp_clips = imp.get("clips") or []
+            if imp_clips:
+                ov_cid = imp_clips[0]["clip_id"]
+                explicit_track = p.get("track_index") is not None
+                target_track = int(p.get("track_index", 2))
+                tl_st = await transport.call("timeline.get_state", {"track_types": ["video"]})
+                v_tracks = tl_st.get("tracks", {}).get("video", [])
+                tl_fps = float(tl_st.get("fps") or fps)
+                ov_frames = max(1, int(res.get("frames") or 1))
+                rec_f = tc_to_frames(str(p["record_tc"]), tl_fps) if p.get("record_tc") else None
+
+                # If track_index wasn't explicitly specified and Video 2 is occupied (e.g. by a Facecam PiP),
+                # automatically bump to the next track so `AppendToTimeline` never silently collides!
+                if rec_f is not None and not explicit_track:
+                    while target_track <= len(v_tracks):
+                        tr_items = v_tracks[target_track - 1].get("items") or []
+                        has_overlap = any(
+                            int(it.get("record_start", 0)) < rec_f + ov_frames
+                            and int(it.get("record_end", 0)) > rec_f
+                            for it in tr_items
+                        )
+                        if not has_overlap:
+                            break
+                        target_track += 1
+
+                v_count = len(v_tracks)
+                while v_count < target_track:
+                    await transport.call("timeline.track_state", {"track_type": "video", "add_track": True, "name": "Overlays"})
+                    v_count += 1
+
+                # If an explicit track has an older overlay item at the same window, remove it before placing the update
+                if rec_f is not None and explicit_track and target_track <= len(v_tracks):
+                    stale_ids = [
+                        it["item_id"]
+                        for it in (v_tracks[target_track - 1].get("items") or [])
+                        if it.get("item_id")
+                        and int(it.get("record_start", 0)) < rec_f + ov_frames
+                        and int(it.get("record_end", 0)) > rec_f
+                        and int(it.get("duration", 0)) <= max(ov_frames * 3, 900)
+                    ]
+                    if stale_ids:
+                        await transport.call("timeline.delete_clips", {"item_ids": stale_ids, "ripple": False})
+
+                app_spec: dict[str, Any] = {
+                    "clip_id": ov_cid,
+                    "track_index": target_track,
+                    "media_type": 1,
+                }
+                if not bool(p.get("static", False)) and ov_frames > 1:
+                    app_spec["start_frame"] = 0
+                    app_spec["end_frame"] = ov_frames - 1  # Resolve AppendToTimeline `endFrame` is 0-indexed inclusive!
+                if p.get("record_tc"):
+                    app_spec["record_tc"] = str(p["record_tc"])
+                app_res = await transport.call("timeline.append_clips", {"clips": [app_spec]})
+                placed = (app_res.get("items") or [{}])[0]
+                res["inserted_clip_id"] = ov_cid
+                res["inserted_item_id"] = placed.get("item_id") or None
+                res["inserted_ok"] = bool(placed.get("item_id"))
+                res["inserted_track"] = target_track
+                res["inserted_tc"] = p.get("record_tc")
+        return res
+
+    if call.op == "youtube.thumbnail":
+        if cfg is None:
+            raise RuntimeError("youtube.thumbnail requires session Config")
+        from davag.youtube.studio import generate_youtube_thumbnail
+
+        refs: list[Path] = []
+        for r_item in p.get("reference_images") or []:
+            if str(r_item) == "grab_current" and transport is not None:
+                grab = await transport.call("timeline.grab_still", {"attach_to_context": False})
+                refs.append(Path(str(grab["path"])))
+            else:
+                rp = Path(str(r_item)).resolve()
+                refs.append(rp if rp in allowed_media else sandbox.resolve_for_read(str(r_item)))
+        if p.get("grab_tc") and transport is not None:
+            grab = await transport.call("timeline.grab_still", {"tc": str(p["grab_tc"]), "attach_to_context": False})
+            refs.append(Path(str(grab["path"])))
+
+        out_p = (
+            sandbox.resolve_for_write(str(p["output_path"]))
+            if p.get("output_path")
+            else (sandbox.cwd / "youtube_staging" / "thumbnail.png")
+        )
+        res = await generate_youtube_thumbnail(
+            prompt=str(p["prompt"]),
+            output_path=out_p,
+            cfg=cfg,
+            reference_images=refs,
+            model_override=str(p["model"]) if p.get("model") else None,
+            aspect_ratio=str(p.get("aspect_ratio", "16:9")),
+        )
+        res["attach_to_context"] = bool(p.get("attach_to_context", True))
+        return res
+
+    if call.op == "youtube.stage":
+        assert transport is not None
+        from davag.youtube.studio import stage_youtube_package
+
+        return await stage_youtube_package(
+            transport=transport,
+            staging_root=sandbox.cwd / "youtube_staging",
+            title=str(p["title"]),
+            description_intro=str(p.get("description") or ""),
+            tags=list(p.get("tags") or []),
+            privacy_status=str(p.get("privacy_status", "private")),
+            category_id=str(p.get("category_id", "28")),
+            thumbnail_path=(
+                str(Path(str(p["thumbnail_path"])).resolve())
+                if p.get("thumbnail_path") and Path(str(p["thumbnail_path"])).resolve() in allowed_media
+                else (str(sandbox.resolve_for_read(str(p["thumbnail_path"]))) if p.get("thumbnail_path") else None)
+            ),
+            primary_url=str(p["primary_url"]) if p.get("primary_url") else None,
+            first_comment=str(p["first_comment"]) if p.get("first_comment") else None,
+            render_qr_markers=bool(p.get("render_qr_markers", True)),
+            append_end_screen=bool(p.get("append_end_screen", True)),
+            end_screen_sec=float(p.get("end_screen_sec", 8.0)),
+            queue_render=bool(p.get("queue_render", True)),
+            start_render=bool(p.get("start_render", False)),
         )
 
     src, resolved_clip_id = _resolve_media_source(p, sandbox, clip_map, allowed_media)
@@ -469,18 +725,34 @@ async def _exec_media_op(
         )
 
     if call.op == "media.transcribe":
+        gem_key = cfg.keys.get("gemini") if cfg else None
         return await transcribe_media(
             src,
             cache_dir=cache_dir / "transcripts",
+            gemini_api_key=gem_key,
             openai_api_key=openai_api_key,
             language=p.get("language"),
+            start_sec=float(p["start_sec"]) if p.get("start_sec") is not None else None,
+            duration_sec=float(p["duration_sec"]) if p.get("duration_sec") is not None else None,
+        )
+
+    if call.op == "media.master_vo":
+        out_p = sandbox.resolve_for_write(str(p["output_path"])) if p.get("output_path") else None
+        return await loop.run_in_executor(
+            None,
+            lambda: master_voiceover_audio(
+                src,
+                output_path=out_p,
+                target_lufs=float(p.get("target_lufs", -14.0)),
+                denoise=bool(p.get("denoise", True)),
+            ),
         )
 
     raise ValueError(f"Unhandled media op: {call.op}")
 
 
 def _is_gated_op(call: OpCall) -> bool:
-    if call.op == "shell":
+    if call.op in ("shell", "youtube.upload", "youtube.update"):
         return True
     spec = get_op(call.op)
     return bool(spec and spec.tier in GATED_TIERS)
@@ -536,11 +808,13 @@ async def execute_batch(
         else ({}, set())
     )
 
+    eff_role = getattr(cfg, "role", "master") if cfg is not None else "master"
     plan_errors = plan_batch(
         ops,
         sandbox=sandbox,
         has_transport=transport is not None,
         resolve_media_paths=allowed_media,
+        role=eff_role,
     )
     if plan_errors:
         return BatchOutcome(status="plan-failed", errors=plan_errors)
@@ -580,8 +854,12 @@ async def execute_batch(
                 )
                 if call.op == "media.proxy_clip" and res.get("attach_to_context"):
                     attached_media.append({"kind": "video", "path": res["path"]})
-                elif call.op == "media.contact_sheet" and res.get("attach_to_context"):
+                elif call.op in ("media.contact_sheet", "youtube.thumbnail") and res.get("attach_to_context"):
                     attached_media.append({"kind": "image", "path": res["path"]})
+                elif call.op in ("motion.render_overlay", "motion.qr_callout"):
+                    attached_media.append(
+                        {"kind": "image" if res.get("format") == "png_rgba" else "preview_only", "path": res["path"]}
+                    )
                 elif call.op == "media.analyze_clip" and res.get("contact_sheet_path"):
                     attached_media.append(
                         {"kind": "preview_only", "path": res["contact_sheet_path"], "proxy_path": res.get("proxy_path")}
@@ -593,15 +871,16 @@ async def execute_batch(
                     attached_media.append({"kind": "image", "path": res["path"]})
 
             results.append({"index": call.index, "op": call.op, "ok": True, "result": res})
-        except (OpError, SandboxError, OSError, RuntimeError, ValueError) as err:
+        except Exception as err:  # noqa: BLE001 — catch SDK/HTTP errors (e.g. 401/429) cleanly into dr_results!
             journal.rollback_files(file_entries)
             if checkpoint is not None and transport is not None:
                 with contextlib.suppress(Exception):
                     await journal.undo_last_resolve(transport)
                     checkpoint = None
+            results.append({"index": call.index, "op": call.op, "ok": False, "error": str(err)})
             return BatchOutcome(
                 status="apply-failed",
-                results=[],
+                results=results,
                 errors=[{"index": call.index, "op": call.op, "message": str(err)}],
             )
 
@@ -655,6 +934,27 @@ async def execute_batch(
                         checkpoint=checkpoint,
                         attached_media=attached_media,
                     )
+            elif call.op == "youtube.upload":
+                from davag.youtube.studio import upload_staged_to_youtube
+
+                mf_path = sandbox.resolve_for_read(str(call.params["manifest_path"]))
+                res = await upload_staged_to_youtube(
+                    manifest_path=mf_path,
+                    home=cfg.home if cfg else cache_dir.parent,
+                )
+                results.append({"index": call.index, "op": call.op, "ok": True, "result": res})
+            elif call.op == "youtube.update":
+                from davag.youtube.studio import update_youtube_video
+
+                mf_path = sandbox.resolve_for_read(str(call.params["manifest_path"]))
+                res = await update_youtube_video(
+                    manifest_path=mf_path,
+                    home=cfg.home if cfg else cache_dir.parent,
+                    video_id=str(call.params["video_id"]) if call.params.get("video_id") else None,
+                    privacy_status=str(call.params["privacy_status"]) if call.params.get("privacy_status") else None,
+                    post_first_comment=bool(call.params.get("post_first_comment", True)),
+                )
+                results.append({"index": call.index, "op": call.op, "ok": True, "result": res})
             else:
                 assert transport is not None
                 res = await transport.call(call.op, call.params)

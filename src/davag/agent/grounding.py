@@ -335,3 +335,75 @@ async def poll_live_resolve_banner(transport: ResolveTransport | None) -> str | 
         f'timeline="{tl.get("name")}" ({tl.get("duration_frames")}f) | playhead={tl.get("playhead_tc")} | '
         f'tracks={tl.get("video_tracks")}V/{tl.get("audio_tracks")}A]{op_marker_str}'
     )
+
+
+async def format_live_timeline_state(transport: ResolveTransport | None) -> str | None:
+    """Build a compact (~350-600 tok) ephemeral summary of the active timeline attached ONLY to the
+    latest outgoing message (`to_messages()[-1]`).
+
+    Preserves 100% prompt-prefix caching on all historical Ledger segments, prevents stale
+    `timeline.get_state` JSON dumps from accumulating across turns, and eliminates extra
+    discovery round-trips after edits!
+    """
+    import json
+
+    if transport is None:
+        return None
+    try:
+        tl_st = await transport.call(
+            "timeline.get_state",
+            {"track_types": ["video", "audio", "subtitle"], "include_properties": True},
+            timeout=2.5,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    tracks = tl_st.get("tracks") or {}
+    sub_tracks = tracks.get("subtitle") or []
+    sub_desc = (
+        ", ".join(
+            f"ST{t['track_index']} \"{t['name']}\" ({'on' if t['enabled'] else 'off'}, {t['item_count']} cues)"
+            for t in sub_tracks
+        )
+        if sub_tracks
+        else "none"
+    )
+
+    lines = [
+        "[Live Timeline State — authoritative current tracks & item_ids; do NOT call `timeline.get_state` unless inspecting individual subtitle cues]",
+        (
+            f"Timeline: \"{tl_st.get('name')}\" | fps={tl_st.get('fps')} | "
+            f"frames={tl_st.get('start_frame')}..{tl_st.get('end_frame')} ({tl_st.get('duration_frames')}f) | "
+            f"playhead={tl_st.get('playhead_tc')} | markers={tl_st.get('markers_count')} | subtitles={sub_desc}"
+        ),
+    ]
+
+    for ttype, prefix in (("video", "V"), ("audio", "A")):
+        for tr in tracks.get(ttype) or []:
+            t_state = "on" if tr.get("enabled", True) else "MUTED/OFF"
+            if tr.get("locked"):
+                t_state += ",LOCKED"
+            items = tr.get("items") or []
+            lines.append(f"  {prefix}{tr['track_index']} \"{tr['name']}\" ({t_state}, {len(items)} items):")
+            if not items:
+                continue
+            # Collapse disabled/muted tracks with >6 items into 1 line to save tokens
+            if not tr.get("enabled", True) and len(items) > 6:
+                lines.append(
+                    f"    • [{len(items)} muted items spanning {items[0]['record_start_tc']}..{items[-1]['record_end_tc']}]"
+                )
+                continue
+            show_items = items if len(items) <= 30 else [*items[:15], None, *items[-10:]]
+            for it in show_items:
+                if it is None:
+                    lines.append(f"    • … ({len(items) - 25} middle items omitted) …")
+                    continue
+                props = it.get("properties") or {}
+                prop_s = f" props={json.dumps(props, separators=(',', ':'))}" if props else ""
+                dis_s = " [DISABLED]" if not it.get("enabled", True) else ""
+                lines.append(
+                    f"    • id={it['item_id']} \"{it['name']}\" rec={it['record_start_tc']}..{it['record_end_tc']} "
+                    f"({it['duration']}f) src={it['source_start']}..{it['source_end']}{dis_s}{prop_s}"
+                )
+
+    return "\n".join(lines)

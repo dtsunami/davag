@@ -41,7 +41,7 @@ class GeminiAdapter:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.thinking_visible = thinking_visible
-        http_opts = types.HttpOptions(base_url=base_url) if base_url else None
+        http_opts = types.HttpOptions(base_url=base_url, timeout=210_000) if base_url else types.HttpOptions(timeout=210_000)
         self._client = genai.Client(api_key=api_key, http_options=http_opts)
 
     async def _ensure_uploaded(self, file_path: str, media_type: str) -> types.Part:
@@ -128,17 +128,44 @@ class GeminiAdapter:
                 ),
             )
 
-            stream = await self._client.aio.models.generate_content_stream(
-                model=self.model,
-                contents=contents,
-                config=cfg,
-            )
+            # 210s TTFT / per-chunk stall guard feeding cleanly into loop.py's automatic retry
+            try:
+                stream = await asyncio.wait_for(
+                    self._client.aio.models.generate_content_stream(
+                        model=self.model,
+                        contents=contents,
+                        config=cfg,
+                    ),
+                    timeout=210.0,
+                )
+            except TimeoutError as t_err:
+                raise ProviderError(
+                    "[gemini] Timed out waiting >210s for stream open",
+                    provider="gemini",
+                    status=408,
+                    retryable=True,
+                ) from t_err
 
             usage_meta = None
             finish_reason = "end_turn"
-            async for chunk in stream:
+            emitted_any = False
+            aiter = stream.__aiter__()
+            while True:
                 if cancel_event is not None and cancel_event.is_set():
                     break
+                try:
+                    chunk = await asyncio.wait_for(aiter.__anext__(), timeout=210.0)
+                except StopAsyncIteration:
+                    break
+                except TimeoutError as t_err:
+                    raise ProviderError(
+                        "[gemini] Stream stalled >210s waiting for next chunk",
+                        provider="gemini",
+                        status=408,
+                        retryable=not emitted_any,
+                    ) from t_err
+                emitted_any = True
+
                 if getattr(chunk, "usage_metadata", None) is not None:
                     usage_meta = chunk.usage_metadata
                 cands = getattr(chunk, "candidates", None) or []

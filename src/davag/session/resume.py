@@ -23,6 +23,11 @@ def find_session_dir(home: Path, resume_arg: str | bool) -> tuple[Path, dict[str
         raise FileNotFoundError("No past sessions found in ~/.davag/sessions")
 
     if resume_arg is True:
+        # Prefer the most recent session that actually recorded conversation turns
+        for d in candidates:
+            tr = d / "transcript.jsonl"
+            if tr.is_file() and tr.stat().st_size > 0:
+                return d, json.loads((d / "meta.json").read_text(encoding="utf-8"))
         chosen = candidates[0]
         return chosen, json.loads((chosen / "meta.json").read_text(encoding="utf-8"))
 

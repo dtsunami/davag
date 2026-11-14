@@ -115,7 +115,7 @@ def apply_staged_prompts(session: Any) -> dict[str, Any]:
         sandbox=session.sandbox,
         resolve_section=getattr(session, "resolve_grounding_snapshot", ""),
     )
-    session.ledger.set_system(build_system_prompt(prompts=vals, grounding=g_text))
+    session.ledger.set_system(build_system_prompt(prompts=vals, grounding=g_text, role=session.cfg.role))
     session.pending_prompts = None
     res = {"applied": True, "staged": False, "before_tokens": before, "after_tokens": session.ledger.system_tokens}
     session.bus.publish("prompts-applied", res)

@@ -108,6 +108,19 @@ MODELS: tuple[ModelSpec, ...] = (
     ),
     # --- Google Gemini (native video + audio + Files API) ---
     ModelSpec(
+        id="gemini-4-carbon",
+        provider="gemini",
+        label="Gemini 4 Carbon",
+        context=1_000_000,
+        max_output=65_536,
+        vision=True,
+        video=True,
+        effort=True,
+        thinking=True,
+        input_price=1.25,
+        output_price=10.0,
+    ),
+    ModelSpec(
         id="gemini-3.8-flash",
         provider="gemini",
         label="Gemini 3.8 Flash",
@@ -243,8 +256,8 @@ MODELS: tuple[ModelSpec, ...] = (
 )
 
 DEFAULT_MODELS: dict[str, str] = {
+    "gemini": "gemini-4-carbon",
     "anthropic": "claude-opus-5-5",
-    "gemini": "gemini-3.8-flash",
     "openai": "gpt-5.1",
     "grok": "grok-4",
     "openrouter": "anthropic/claude-opus-5",

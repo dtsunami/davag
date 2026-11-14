@@ -39,7 +39,9 @@ DEFAULT_YOUTUBE_MINUTES = 10.0
 YOUTUBE_RE = re.compile(
     r"^https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?(?:[^&\s]*&)*v=|embed/|shorts/|live/)|youtu\.be/)([\w-]{11})"
 )
-AT_REF_RE = re.compile(r"@([^\s\"']+)")
+# Matches @"C:\path with spaces\file.mp4", @'path', or @unquoted/path.png
+AT_REF_RE = re.compile(r'@"([^"]+)"|@\'([^\']+)\'|@([^\s"\']+)')
+MAX_RAW_IMAGE_BYTES = 3_500_000  # Downscale/compress >3.5 MB stills (e.g. 25 MB 16-bit 4K Resolve grabs!)
 
 
 def is_youtube_url(s: str) -> bool:
@@ -69,13 +71,65 @@ def youtube_ref(url: str, *, minutes: float | None = None) -> dict[str, Any]:
     }
 
 
+def _compress_oversized_image(src: Path) -> tuple[bytes, str] | None:
+    """Compress >3.5 MB images (such as 25 MB 16-bit 4K Resolve stills) to crisp <=1920px JPEG."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    with tempfile.NamedTemporaryFile(prefix="davag_img_opt_", suffix=".jpg", delete=False) as tmp:
+        out_jpg = Path(tmp.name)
+    try:
+        res = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(src),
+                "-vf",
+                "scale='min(1920,iw)':-2",
+                "-frames:v",
+                "1",
+                "-q:v",
+                "3",
+                str(out_jpg),
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        if res.returncode == 0 and out_jpg.is_file() and out_jpg.stat().st_size > 64:
+            return out_jpg.read_bytes(), "image/jpeg"
+        return None
+    finally:
+        out_jpg.unlink(missing_ok=True)
+
+
 def load_image_part(path_or_abs: str | Path, sandbox: Sandbox | None = None) -> dict[str, Any]:
     p = sandbox.resolve_for_read(path_or_abs) if sandbox is not None else Path(path_or_abs).resolve()
     ext = p.suffix.lower()
     mime = IMAGE_MEDIA.get(ext)
     if not mime:
         raise ValueError(f"{p.name}: unsupported image format ({', '.join(IMAGE_MEDIA)})")
-    raw = p.read_bytes()
+    size = p.stat().st_size
+    if size == 0:
+        raise ValueError(f"{p.name}: image file is empty (0 bytes)")
+
+    if size > MAX_RAW_IMAGE_BYTES:
+        compressed = _compress_oversized_image(p)
+        if compressed is not None:
+            raw, mime = compressed
+        else:
+            raw = p.read_bytes()
+    else:
+        raw = p.read_bytes()
+
     return {
         "media_type": mime,
         "data": base64.b64encode(raw).decode("ascii"),
@@ -133,18 +187,23 @@ def load_video_part(path_or_abs: str | Path, sandbox: Sandbox | None = None) -> 
     }
 
 
+def _match_ref(m: re.Match[str]) -> str:
+    return (m.group(1) or m.group(2) or m.group(3) or "").strip()
+
+
 def extract_image_refs(text: str, sandbox: Sandbox) -> tuple[str, list[str]]:
     images: list[str] = []
 
     def _sub(m: re.Match[str]) -> str:
-        ref = m.group(1)
+        ref = _match_ref(m)
         if not is_image_path(ref):
             return m.group(0)
         with contextlib.suppress(Exception):
-            p = sandbox.resolve_for_read(ref)
-            if p.is_file():
-                images.append(ref)
-                return f"[image: {ref}]"
+            cand = (Path(ref) if Path(ref).is_absolute() else (sandbox.cwd / ref)).resolve()
+            if cand.is_file():
+                sandbox.allow_read_file(cand)
+                images.append(str(cand))
+                return f"[attached image: {cand}]"
         return m.group(0)
 
     return AT_REF_RE.sub(_sub, text), images
@@ -155,17 +214,18 @@ def extract_video_refs(text: str, sandbox: Sandbox) -> tuple[str, list[str], lis
     youtube: list[str] = []
 
     def _sub(m: re.Match[str]) -> str:
-        ref = m.group(1)
+        ref = _match_ref(m)
         if is_youtube_url(ref):
             youtube.append(ref)
             return f"[video: {ref}]"
         if not is_video_path(ref):
             return m.group(0)
         with contextlib.suppress(Exception):
-            p = sandbox.resolve_for_read(ref)
-            if p.is_file():
-                videos.append(ref)
-                return f"[video: {ref}]"
+            cand = (Path(ref) if Path(ref).is_absolute() else (sandbox.cwd / ref)).resolve()
+            if cand.is_file():
+                sandbox.allow_read_file(cand)
+                videos.append(str(cand))
+                return f"[video: {cand}]"
         return m.group(0)
 
     return AT_REF_RE.sub(_sub, text), videos, youtube

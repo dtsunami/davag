@@ -136,6 +136,7 @@ async def run_headless_async(
 
     session.agent.on("approval-request", _on_approval)
 
+    session.history.add(prompt)
     try:
         out = await session.agent.run(prompt)
         if not json_mode and out.get("status") == "done":

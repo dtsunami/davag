@@ -13,6 +13,8 @@ dependencies = [
   "google-genai>=1.5.0",
   "openai>=1.68.0",
   "aiohttp>=3.11.0",
+  "fastapi>=0.115.0",
+  "uvicorn>=0.34.0",
   "prompt-toolkit>=3.0.50",
   "rich>=13.9.0",
 ]
@@ -34,7 +36,7 @@ davag = "davag.cli:run"
 where = ["src"]
 
 [tool.setuptools.package-data]
-davag = ["ui/web/*", "prompts/*.md"]
+davag = ["ui/web/*", "prompts/*.md", "docs/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

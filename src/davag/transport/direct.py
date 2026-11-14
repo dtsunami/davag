@@ -107,6 +107,15 @@ class DirectTransport(ResolveTransport):
 
     def _call_sync(self, op_name: str, params: dict[str, Any] | None) -> dict[str, Any]:
         ctx = self._connect_sync()
+        if self._injected_resolve is None:
+            try:
+                # Verify C++ fusionscript handle is still alive (guards overnight sleep/Resolve restart)
+                if ctx.resolve.GetProductName() is None:
+                    self._ctx = None
+                    ctx = self._connect_sync()
+            except Exception:  # noqa: BLE001
+                self._ctx = None
+                ctx = self._connect_sync()
         return dispatch_op(ctx, op_name, params)
 
     async def call(

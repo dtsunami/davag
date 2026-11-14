@@ -16,8 +16,6 @@ from pathlib import Path
 from typing import Any
 
 from davag.config.env import Config
-from davag.context.media import load_image_part, load_video_part
-from davag.providers import create_provider
 
 from .ffmpeg import (
     detect_scene_cuts,
@@ -140,8 +138,8 @@ async def analyze_clip_with_scout(
     from dataclasses import replace
 
     src = Path(file_path).resolve()
-    is_full_clip = start_sec is None and duration_sec is None and not question
-    if is_full_clip and not force_refresh:
+    is_full_clip = start_sec is None and duration_sec is None
+    if is_full_clip and not question and not force_refresh:
         existing = load_clip_digest(cache_dir, src)
         if existing:
             return {**existing, "cached": True}
@@ -183,6 +181,8 @@ async def analyze_clip_with_scout(
 
     scout_prov, scout_model_id = pick_scout_provider_and_model(cfg)
     from davag.config.models import resolve_model
+    from davag.context.media import load_image_part, load_video_part
+    from davag.providers import create_provider
 
     scout_spec = resolve_model(scout_prov, scout_model_id)
     scout_cfg = replace(cfg, provider=scout_prov, model=scout_spec, max_tokens=4096, effort="medium")

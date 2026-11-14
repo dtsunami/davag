@@ -26,8 +26,13 @@ def op_timeline_grab_still(ctx: OpContext, params: dict[str, Any]) -> dict[str, 
     proj = ctx.project
     tl = ctx.timeline
 
-    if params.get("tc") and not tl.SetCurrentTimecode(str(params["tc"]).strip()):
-        raise OpError(f"Could not move playhead to {params['tc']}", code="PLAYHEAD_FAILED")
+    if params.get("tc"):
+        target_tc = str(params["tc"]).strip()
+        cur_page = str(safe_call(ctx.resolve, "GetCurrentPage", default="edit") or "edit").lower()
+        if cur_page == "deliver":
+            safe_call(ctx.resolve, "OpenPage", "edit")
+        if not tl.SetCurrentTimecode(target_tc):
+            raise OpError(f"Could not move playhead to {target_tc}", code="PLAYHEAD_FAILED")
 
     out_raw = params.get("output_path")
     if out_raw:
@@ -76,7 +81,11 @@ def op_color_apply_lut(ctx: OpContext, params: dict[str, Any]) -> dict[str, Any]
     safe_call(ctx.project, "RefreshLUTList")
     matches = find_timeline_items(ctx.timeline, [str(x) for x in item_ids])
     for _tt, _ti, item in matches:
-        if not item.SetLUT(node_idx, lut_path):
+        graph = safe_call(item, "GetNodeGraph")
+        applied = bool(safe_call(graph, "SetLUT", node_idx, lut_path, default=False)) if graph else False
+        if not applied and hasattr(item, "SetLUT"):
+            applied = bool(item.SetLUT(node_idx, lut_path))
+        if not applied:
             raise OpError(
                 f'SetLUT({node_idx}, "{lut_path}") failed on {safe_call(item, "GetName")}',
                 code="SET_LUT_FAILED",

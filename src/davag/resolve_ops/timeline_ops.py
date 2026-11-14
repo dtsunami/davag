@@ -76,14 +76,50 @@ def _serialize_timeline_item(item: Any, fps: Any, *, include_props: bool = False
         "record_end_tc": frames_to_tc(rec_end, fps),
         "duration": int(safe_call(item, "GetDuration", default=max(0, rec_end - rec_start))),
         "source_start": int(safe_call(item, "GetLeftOffset", default=0)),
-        "source_end": int(safe_call(item, "GetRightOffset", default=0)),
+        "source_end": int(safe_call(item, "GetLeftOffset", default=0))
+        + int(safe_call(item, "GetDuration", default=max(0, rec_end - rec_start))),
         "enabled": bool(safe_call(item, "GetClipEnabled", default=True)),
         "clip_color": str(safe_call(item, "GetClipColor", default="")),
         "fusion_comps": int(safe_call(item, "GetFusionCompCount", default=0)),
         "markers_count": len(markers) if isinstance(markers, dict) else 0,
     }
     if include_props:
-        out["properties"] = lua_dict(safe_call(item, "GetProperty", default={}))
+        raw_props = lua_dict(safe_call(item, "GetProperty", default={}))
+        _defaults = {
+            "Pan": 0.0,
+            "Tilt": 0.0,
+            "ZoomX": 1.0,
+            "ZoomY": 1.0,
+            "ZoomGang": True,
+            "RotationAngle": 0.0,
+            "AnchorPointX": 0.0,
+            "AnchorPointY": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0,
+            "FlipX": False,
+            "FlipY": False,
+            "CropLeft": 0.0,
+            "CropRight": 0.0,
+            "CropTop": 0.0,
+            "CropBottom": 0.0,
+            "CropSoftness": 0.0,
+            "CropRetain": False,
+            "DynamicZoomEase": 0,
+            "CompositeMode": 0,
+            "Opacity": 100.0,
+            "Distortion": 0.0,
+            "RetimeProcess": 0,
+            "MotionEstimation": 0,
+            "Scaling": 0,
+            "ResizeFilter": 0,
+            "TransformEnabled": True,
+            "CroppingEnabled": True,
+            "DynamicZoomEnabled": False,
+            "CompositeEnabled": True,
+            "LensCorrectionEnabled": True,
+            "RetimeAndScalingEnabled": True,
+        }
+        out["properties"] = {k: v for k, v in raw_props.items() if _defaults.get(k, object()) != v}
     return out
 
 
@@ -144,10 +180,11 @@ def op_timeline_select(ctx: OpContext, params: dict[str, Any]) -> dict[str, Any]
 @resolve_op(
     "timeline.get_state",
     tier="read",
-    summary="Inspect tracks, clips, frame ranges, and playhead of the active timeline.",
+    summary="Inspect tracks, clips, frame ranges, and playhead (note: V/A state is already attached ephemerally on every turn; call only for subtitle items or specific filters).",
     params_doc={
-        "include_properties": "Optional bool (default false) — include transform/crop properties per clip",
+        "include_properties": "Optional bool (default false) — include non-default transform/crop/audio properties",
         "track_types": "Optional list of track types (default ['video', 'audio', 'subtitle'])",
+        "track_index": "Optional 1-based track index filter",
     },
 )
 def op_timeline_get_state(ctx: OpContext, params: dict[str, Any]) -> dict[str, Any]:
@@ -156,6 +193,7 @@ def op_timeline_get_state(ctx: OpContext, params: dict[str, Any]) -> dict[str, A
     fps = safe_call(proj, "GetSetting", "timelineFrameRate", default="24")
     include_props = bool(params.get("include_properties", False))
     want_types = params.get("track_types") or list(TRACK_TYPES)
+    only_tidx = int(params["track_index"]) if params.get("track_index") is not None else None
 
     tracks_out: dict[str, list[dict[str, Any]]] = {}
     total_items = 0
@@ -165,6 +203,8 @@ def op_timeline_get_state(ctx: OpContext, params: dict[str, Any]) -> dict[str, A
         tcount = int(safe_call(tl, "GetTrackCount", ttype, default=0))
         tlist: list[dict[str, Any]] = []
         for tidx in range(1, tcount + 1):
+            if only_tidx is not None and tidx != only_tidx:
+                continue
             raw_items = lua_list(safe_call(tl, "GetItemListInTrack", ttype, tidx, default=[]))
             serialized = [_serialize_timeline_item(it, fps, include_props=include_props) for it in raw_items]
             total_items += len(serialized)
@@ -306,7 +346,7 @@ def op_timeline_delete_timeline(ctx: OpContext, params: dict[str, Any]) -> dict[
     params_doc={
         "clips": (
             "List of dicts: {clip_id or clip_name, start_frame?, end_frame?, "
-            "track_index? (1-based), record_frame?, media_type? (1=video, 2=audio)}"
+            "track_index? (1-based), record_frame? or record_tc?, media_type? (1=video, 2=audio)}"
         )
     },
 )
@@ -338,6 +378,8 @@ def op_timeline_append_clips(ctx: OpContext, params: dict[str, Any]) -> dict[str
             info["trackIndex"] = int(spec["track_index"])
         if spec.get("record_frame") is not None:
             info["recordFrame"] = int(spec["record_frame"])
+        elif spec.get("record_tc"):
+            info["recordFrame"] = tc_to_frames(str(spec["record_tc"]), fps)
         if spec.get("media_type") is not None:
             info["mediaType"] = int(spec["media_type"])
         clip_infos.append(info)
@@ -434,7 +476,11 @@ def op_timeline_set_clip_state(ctx: OpContext, params: dict[str, Any]) -> dict[s
         if params.get("enabled") is not None:
             item.SetClipEnabled(bool(params["enabled"]))
         if params.get("clip_color") is not None:
-            item.SetClipColor(str(params["clip_color"]))
+            cc = str(params["clip_color"]).strip()
+            if cc == "" and callable(getattr(item, "ClearClipColor", None)):
+                item.ClearClipColor()
+            else:
+                item.SetClipColor(cc)
     return {"updated_count": len(matches)}
 
 

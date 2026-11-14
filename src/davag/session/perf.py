@@ -63,7 +63,13 @@ class PerfTracker:
         max_slot = max(self._char_buckets.keys(), default=0)
         buckets = [round(self._char_buckets.get(s, 0) * scale, 2) for s in range(max_slot + 1)]
 
-        gen_window = max(0.05, elapsed - (self._active_ttft or 0.0))
+        vis_est = round(self._total_chars / 3.8)
+        # If internal unstreamed thinking tokens accounted for most of `out_tokens` during `ttft`,
+        # measure over `elapsed` rather than dividing hidden thinking tokens by a 0.05s text tail!
+        if self._active_ttft and self._active_ttft > 0.7 * elapsed and est_toks > max(64, vis_est * 2):
+            gen_window = max(0.05, elapsed)
+        else:
+            gen_window = max(0.05, elapsed - (self._active_ttft or 0.0))
         tps = round(est_toks / gen_window, 1) if est_toks > 0 else 0.0
 
         rec = TurnPerf(

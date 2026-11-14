@@ -8,3 +8,6 @@ build/
 .ruff_cache/
 .env
 davai/
+youtube_staging/
+vo_scripts/
+overlays/

@@ -165,6 +165,40 @@ async def test_web_sidecar_auth_sse_replay_grab_and_approval(
                 chunk = await asyncio.wait_for(sse_replay.content.read(2048), timeout=2.0)
                 assert b"event: hello" in chunk
                 assert b"id: 2" in chunk
+
+            # 5. Regression test for WinError 10054 (`_ProactorBasePipeTransport._call_connection_lost`
+            #    when browser aborts in-flight `<img>` / `<video>` sockets with TCP RST):
+            import socket
+            import struct
+
+            loop = asyncio.get_running_loop()
+            unhandled_excs: list[dict[str, Any]] = []
+            prev_handler = loop.get_exception_handler()
+            from davag.server.http import is_benign_socket_disconnect
+            loop.set_exception_handler(lambda _l, ctx: None if is_benign_socket_disconnect(ctx.get("exception")) else unhandled_excs.append(ctx))
+            try:
+                for _ in range(12):
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.connect(("127.0.0.1", srv.port))
+                    s.sendall(f"GET /api/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {srv.token}\r\n\r\n".encode())
+                    # Force hard TCP RST (`SO_LINGER` l_onoff=1, l_linger=0) -> triggers WinError 10054 on server!
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh", 1, 0))
+                    s.close()
+                # Also reset an already-accepted connection mid-response to exercise `_call_connection_lost`!
+                s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s2.connect(("127.0.0.1", srv.port))
+                s2.sendall(f"GET /api/events?token={srv.token} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".encode())
+                _ = s2.recv(64)
+                s2.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh", 1, 0))
+                s2.close()
+                await asyncio.sleep(0.15)
+                assert unhandled_excs == [], f"Expected zero unhandled loop exceptions on TCP RST, got: {unhandled_excs}"
+
+                # Server remains 100% healthy after the TCP RST storm!
+                async with client.get(f"{srv.url}/api/session", headers=headers) as r_after:
+                    assert r_after.status == 200
+            finally:
+                loop.set_exception_handler(prev_handler)
     finally:
         await srv.close()
         await session.close()

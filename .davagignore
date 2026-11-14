@@ -1,0 +1,6 @@
+# Files ignored specifically by the `davag` video-editing agent's workspace grounding
+# so `davag` stays focused on media/editorial files rather than reading its own source code!
+tests/
+src/
+pyproject.toml
+plan.md

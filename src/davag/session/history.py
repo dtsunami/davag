@@ -29,7 +29,7 @@ class PromptHistory:
 
     def add(self, text: str) -> None:
         cleaned = text.strip()
-        if not cleaned or cleaned.startswith("/"):
+        if not cleaned or cleaned.startswith(("/", "sh ")) or cleaned == "sh":
             return
         if self.entries and self.entries[-1].get("text") == cleaned:
             return

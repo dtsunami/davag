@@ -14,17 +14,25 @@ class Sandbox:
     def __init__(self, cwd: str | Path, *, ro_dirs: list[Path] | None = None) -> None:
         self.cwd = Path(cwd).resolve()
         self.ro_dirs = [Path(p).resolve() for p in (ro_dirs or [])]
+        self.allowed_files: set[Path] = set()
         self.ignore_patterns = self._load_daignore()
 
+    def allow_read_file(self, file_path: str | Path) -> Path:
+        """Allowlist a specific file explicitly referenced by the operator via `@path`."""
+        resolved = Path(file_path).resolve()
+        self.allowed_files.add(resolved)
+        return resolved
+
     def _load_daignore(self) -> list[str]:
-        daignore = self.cwd / ".daignore"
-        if not daignore.is_file():
-            return []
         patterns: list[str] = []
-        for raw in daignore.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = raw.strip()
-            if line and not line.startswith("#"):
-                patterns.append(line.rstrip("/"))
+        for fname in (".daignore", ".davagignore"):
+            ig_file = self.cwd / fname
+            if not ig_file.is_file():
+                continue
+            for raw in ig_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if line and not line.startswith("#"):
+                    patterns.append(line.rstrip("/"))
         return patterns
 
     def is_ignored(self, abs_path: Path) -> bool:
@@ -49,6 +57,8 @@ class Sandbox:
     def resolve_for_read(self, user_path: str | Path) -> Path:
         raw = Path(user_path)
         resolved = (raw if raw.is_absolute() else (self.cwd / raw)).resolve()
+        if resolved in self.allowed_files:
+            return resolved
         allowed = self._is_within(resolved, self.cwd) or any(
             self._is_within(resolved, ro) for ro in self.ro_dirs
         )

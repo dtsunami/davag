@@ -128,16 +128,23 @@ def create_dispatcher(
             )
 
         for vid_ref in videos:
-            if not session.cfg.model.video:
-                _push(
-                    {
-                        "type": "warning",
-                        "message": f"{session.cfg.model.id} does not accept video — switch `/model gemini` to watch {vid_ref}.",
-                    },
-                    origin=origin,
-                )
-                continue
             try:
+                from davag.media_intel.ffmpeg import probe_media
+
+                v_info = probe_media(vid_ref)
+                dur_s = float(v_info.get("duration_sec") or 0.0)
+                # For long videos (>90s), allowlist the path for fast contact-sheet/transcribe/import
+                # rather than burning 150k+ raw video tokens upfront!
+                if dur_s > 90.0 or not session.cfg.model.video:
+                    _push(
+                        {
+                            "type": "notice",
+                            "message": f"authorized media path {vid_ref} ({dur_s:.1f}s — ready for media.contact_sheet / transcribe / mediapool.import)",
+                        },
+                        origin=origin,
+                    )
+                    continue
+
                 vid = load_video_part(vid_ref, session.sandbox)
                 session.ledger.add(
                     seg_type="media",

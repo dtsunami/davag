@@ -35,6 +35,7 @@ OPTIONS
   -m, --model <id>           override the model for this run
       --provider <name>      anthropic | gemini | openai | grok | openrouter
       --effort <level>       low | medium | high | xhigh | max
+      --role <role>          reviewer | logger | editor | finisher | master
       --transport <mode>     auto | direct | bridge
   -C, --cwd <dir>            run against a different working directory
       --web                  also serve the session over HTTP (default 127.0.0.1:7879)
@@ -140,6 +141,8 @@ def parse_args(argv: list[str]) -> ParsedArgs:
             out.overrides["DAVAG_PROVIDER"] = next_val(a)
         elif a == "--effort":
             out.overrides["DAVAG_EFFORT"] = next_val(a)
+        elif a == "--role":
+            out.overrides["DAVAG_ROLE"] = next_val(a)
         elif a == "--transport":
             out.overrides["DAVAG_TRANSPORT"] = next_val(a)
         elif a in ("-C", "--cwd"):

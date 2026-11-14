@@ -14,6 +14,7 @@ from .ffmpeg import (
     extract_proxy_clip,
     generate_contact_sheet,
     generate_editing_proxy,
+    master_voiceover_audio,
     probe_media,
 )
 from .hwaccel import GPUCapabilities, detect_gpu_capabilities
@@ -31,6 +32,7 @@ __all__ = [
     "generate_contact_sheet",
     "generate_editing_proxy",
     "load_clip_digest",
+    "master_voiceover_audio",
     "pick_scout_provider_and_model",
     "probe_media",
     "save_clip_digest",

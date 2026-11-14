@@ -133,7 +133,7 @@ async def bootstrap_session(
     )
     cfg.warnings.extend(notices)
 
-    system_prompt = build_system_prompt(prompts=prompts, grounding=grounding_text)
+    system_prompt = build_system_prompt(prompts=prompts, grounding=grounding_text, role=cfg.role)
     ledger = Ledger(limit=cfg.context_limit, compact_at=cfg.compact_at)
     ledger.set_system(system_prompt)
 

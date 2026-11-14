@@ -27,8 +27,16 @@
       <header class="topbar">
         <span class="dot" id="conn-dot" title="SSE disconnected"></span>
         <strong id="hdr-model">—</strong>
+        <select id="sel-hdr-role" class="role-select" title="Active Agent Capability Surface">
+          <option value="reviewer">role: reviewer (RO)</option>
+          <option value="logger">role: logger</option>
+          <option value="editor">role: editor</option>
+          <option value="finisher">role: finisher</option>
+          <option value="master" selected>role: master</option>
+        </select>
         <span class="badge" id="hdr-resolve">resolve: —</span>
         <span class="badge danger" id="hdr-yolo" hidden>yolo</span>
+        <span class="badge activity-badge" id="hdr-activity" hidden><span class="spin-ring small"></span><span id="hdr-activity-text">thinking…</span></span>
         <button id="btn-copy-url" class="btn small" title="Copy tokenized share URL">🔗 Copy URL</button>
         <button id="btn-copy-tok" class="btn small" title="Copy bearer token">🔑 Copy Token</button>
         <span class="spacer"></span>
@@ -36,11 +44,13 @@
         <canvas id="hdr-spark" width="84" height="18" title="tok/s sparkline"></canvas>
         <nav class="tabs">
           <button class="tab active" data-tab="chat">chat</button>
+          <button class="tab" data-tab="timeline">🎬 timeline</button>
           <button class="tab" data-tab="resolve">resolve</button>
           <button class="tab" data-tab="context">context</button>
           <button class="tab" data-tab="perf">perf</button>
           <button class="tab" data-tab="models">models & keys</button>
           <button class="tab" data-tab="artifacts">artifacts</button>
+          <button class="tab" data-tab="help">📖 help</button>
         </nav>
       </header>
 
@@ -66,7 +76,7 @@
             <div id="transcript"></div>
             <div id="live-thinking" class="entry thinking" hidden></div>
             <div id="live-text" class="entry assistant" hidden></div>
-            <div id="live-status" class="status-pill" hidden></div>
+            <div id="live-status" class="status-pill" hidden><span class="spin-ring"></span><span id="live-status-text">working…</span></div>
           </div>
 
           <!-- Raced Approval Banner -->
@@ -88,6 +98,148 @@
               <button type="button" id="btn-cancel" class="btn danger" hidden>Cancel (Esc)</button>
             </div>
           </form>
+        </section>
+
+        <!-- UNIFIED TOP-TIMELINE + LEFT SYNCED ACCORDION + LARGE 16:9 VIEWER & AI DEBUG STUDIO -->
+        <section id="view-timeline" class="view nle-workspace" hidden>
+          <!-- TOP RIBBON: Precision Tape-Measure Timeline, Flag Pennants, Rich Downward Tooltips & Hotkey Bar -->
+          <div class="nle-top-ribbon">
+            <div class="nle-ribbon-bar">
+              <div class="row-gap">
+                <strong id="nle-tl-name">Timeline: —</strong>
+                <code id="ov-nle-tc" class="nle-tc-readout">01:00:00:00 · 00:00</code>
+                <button type="button" id="btn-tl-zoom-reset" class="btn small" title="Wheel over timeline = Zoom in/out · Shift+Wheel or drag scrollbar = Pan">🔍 1.0×</button>
+                <span class="hotkey-hint">Wheel=Zoom · Shift+Wheel=Pan · Keys: <kbd>M</kbd> ◇VO · <kbd>O</kbd> ⬡JS · <kbd>Q</kbd> ○QR · <kbd>N</kbd> △Note</span>
+              </div>
+              <div class="row-gap">
+                <span class="muted" id="ov-nle-status" style="font-size:11px;"></span>
+                <button type="button" id="btn-add-vo" class="btn small flag-tool cyan" title="Drop Cyan Diamond Chapter/VO Marker at Hover/Playhead (M)">◇ +VO <kbd>M</kbd></button>
+                <button type="button" id="btn-add-ov" class="btn small flag-tool mint" title="Drop Green Gem JS Overlay Marker at Hover/Playhead (O)">⬡ +JS <kbd>O</kbd></button>
+                <button type="button" id="btn-add-qr" class="btn small flag-tool purple" title="Drop Purple Circle QR Link Marker at Hover/Playhead (Q)">○ +QR <kbd>Q</kbd></button>
+                <button type="button" id="btn-add-note" class="btn small flag-tool yellow" title="Drop Note Marker at Hover/Playhead (N)">△ +Note <kbd>N</kbd></button>
+                <button type="button" id="btn-label-clip" class="btn small" title="Label Clip Color under Hover/Playhead (L)">🏷 Label <kbd>L</kbd></button>
+                <button type="button" id="btn-toggle-tracks" class="btn small" title="Show/Hide raw V1/V2/V3 clip lanes">▾ Tracks</button>
+                <button type="button" id="btn-ov-refresh" class="btn small" title="Refresh from Resolve">↻</button>
+              </div>
+            </div>
+
+            <div class="nle-stage-top" id="ov-nle-stage">
+              <!-- Unified Tall Graduated Canvas + Geometric Stemmed Markers (◇ Cyan, ⬡ Green, ○ Purple) -->
+              <div class="nle-ruler" id="ov-nle-ruler" hidden></div>
+              <div class="nle-hover-pill" id="ov-hover-pill" hidden>00:00</div>
+              <div class="nle-markers-lane" id="ov-nle-markers"></div>
+
+              <!-- Zoom/Pan Scrollbar Overview Strip -->
+              <div class="nle-pan-track" id="ov-pan-track">
+                <div class="nle-pan-thumb" id="ov-pan-thumb" style="left:0%;width:100%;"></div>
+              </div>
+
+              <!-- Optional Raw Multi-Track Video Lanes -->
+              <div class="nle-tracks" id="ov-nle-tracks" hidden></div>
+
+              <!-- Hover Hairline & Red Playhead -->
+              <div class="nle-hover-line" id="ov-hover-line" hidden></div>
+              <div class="nle-playhead" id="ov-nle-playhead" style="left:0%;">
+                <div class="nle-playhead-head"></div>
+              </div>
+
+              <!-- Downward Interactive Rich Popover -->
+              <div class="nle-flag-tooltip" id="nle-flag-tooltip" hidden></div>
+            </div>
+          </div>
+
+          <!-- LOWER WORKSPACE: Left Synced Expandable Browser + Right Huge 16:9 Viewer & AI Co-Director -->
+          <div class="nle-lower">
+            <!-- LEFT PANE: Synced Accordion Browser with Inline Edit & Clip Labels -->
+            <aside class="nle-pane nle-left">
+              <div class="nle-filter-bar" id="nle-filter-bar">
+                <button type="button" class="pill active" data-flt="all">All</button>
+                <button type="button" class="pill" data-flt="vo">🔵 VO / Ch</button>
+                <button type="button" class="pill" data-flt="qr">🟣 QR</button>
+                <button type="button" class="pill" data-flt="ov">🟢 Overlays</button>
+                <button type="button" class="pill" data-flt="yt">📦 YouTube</button>
+                <span class="spacer"></span>
+                <button type="button" id="btn-prompter-push" class="btn small" title="Push VO Cues to Resolve SRT &amp; Fairlight ADR CSV">📺 SRT/ADR</button>
+                <button type="button" id="btn-prompter-polish" class="btn small" title="Ask AI to polish all VO lines">✨ VO</button>
+              </div>
+
+              <!-- Clip Color Label Picker Drawer (when labeling a timeline clip) -->
+              <div class="clip-label-drawer" id="insp-clip-label-row" hidden>
+                <div class="row-between" style="margin-bottom:5px;">
+                  <span style="font-size:11px; font-weight:700; color:#fff3b0;">🏷 Label Clip: <span id="lbl-clip-target">—</span></span>
+                  <button type="button" id="btn-close-clip-lbl" class="btn small">✕</button>
+                </div>
+                <div class="color-swatches" id="insp-clip-swatches"></div>
+              </div>
+
+              <!-- Synced Accordion List (expands active item inline with full edit controls!) -->
+              <div class="nle-index-scroll" id="nle-index-list"></div>
+            </aside>
+
+            <!-- MAIN CENTER/RIGHT STAGE: Huge 16:9 Program Viewer + Transport + Unified AI Debug Bar -->
+            <div class="nle-center">
+              <div class="nle-viewer-outer">
+                <div class="nle-viewer-stage" id="nle-viewer-stage">
+                  <img id="nle-viewer-img" alt="Program Frame" />
+                  <iframe id="ifr-ov-preview" sandbox="allow-scripts" class="ov-iframe" hidden></iframe>
+                  <div class="nle-viewer-badge" id="nle-viewer-badge">01:00:00:00</div>
+
+                  <!-- Live JS Overlay Debugger Scrubber Pill (top-right when previewing JS/HTML overlay) -->
+                  <div class="nle-ov-debug-hud" id="nle-ov-debug-hud" hidden>
+                    <label class="inline" style="font-size:11px;"><input type="checkbox" id="chk-ov-live-canvas" /> Live JS Sandbox</label>
+                    <input type="range" id="rng-ov-scrub" min="0" max="6" step="0.05" value="2.0" style="width:130px;" />
+                    <code id="lbl-ov-scrub" style="font-size:11px;">t=2.0s</code>
+                  </div>
+
+                  <!-- Synced VO Teleprompter + Marker Progress Overlay -->
+                  <div class="nle-vo-hud" id="nle-vo-hud">
+                    <div class="row-between" style="font-size:11px; margin-bottom:2px;">
+                      <strong id="nle-vo-beat" style="color:#4cc9f0;">—</strong>
+                      <span id="nle-vo-rem" style="color:#ffb088; font-weight:700;"></span>
+                    </div>
+                    <div id="nle-vo-text" class="nle-vo-line">Glide across the tape-measure timeline above to inspect frames, flags &amp; live overlays.</div>
+                    <div class="nle-vo-bar"><div id="nle-vo-fill"></div></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Transport Controls -->
+              <div class="nle-transport">
+                <div class="row-gap">
+                  <button type="button" id="btn-nle-prev" class="btn small" title="Previous Marker">⏮ Prev Flag</button>
+                  <button type="button" id="btn-nle-back" class="btn small" title="-1 second">◀ -1s</button>
+                  <label class="inline pill-toggle" title="Poll Resolve playhead live">
+                    <input type="checkbox" id="chk-nle-follow" /> Follow Resolve
+                  </label>
+                  <button type="button" id="btn-nle-fwd" class="btn small" title="+1 second">+1s ▶</button>
+                  <button type="button" id="btn-nle-next" class="btn small" title="Next Marker">Next Flag ⏭</button>
+                </div>
+
+                <div class="row-gap">
+                  <label class="inline" style="font-size:11px;"><input type="checkbox" id="chk-show-vo-hud" checked /> VO Progress HUD</label>
+                  <button type="button" id="btn-ov-live-comp" class="btn small" title="Grab 1600p true Resolve multi-track composite">📸 HD Composite</button>
+                </div>
+              </div>
+
+              <!-- Unified Contextual AI Co-Director / Overlay & Beat Debugger Prompt Bar -->
+              <form id="nle-ai-form" class="nle-ai-bar">
+                <div class="row-between" style="margin-bottom:5px;">
+                  <div class="row-gap">
+                    <span class="badge" id="nle-ai-scope" style="background:#1d3557; color:#90e0ef;">🤖 Scope: Timeline @ Playhead</span>
+                    <div class="row-gap" id="nle-ai-chips"></div>
+                  </div>
+                  <div class="row-gap">
+                    <span id="nle-ai-live" style="font-size:11px; color:#ffb088; font-weight:700;"></span>
+                    <button type="button" id="btn-nle-open-chat" class="btn small">Chat Transcript ↗</button>
+                  </div>
+                </div>
+                <div class="row-gap">
+                  <input id="inp-nle-ai" style="flex:1;" placeholder="Ask davag to rewrite this JS animation, add a callout at hover/playhead, or refine this beat…" autocomplete="off" />
+                  <button type="submit" class="btn primary small">✨ Run with AI</button>
+                </div>
+              </form>
+            </div>
+          </div>
         </section>
 
         <!-- RESOLVE INSPECTOR VIEW -->
@@ -181,6 +333,12 @@
           <h2>Session Artifacts</h2>
           <div id="artifacts-list" class="stack"></div>
           <pre id="artifact-preview" class="ap-code" hidden></pre>
+        </section>
+
+        <!-- HELP & DOCS VIEW -->
+        <section id="view-help" class="view docs-layout" hidden>
+          <aside id="docs-nav" class="docs-sidebar"></aside>
+          <article id="docs-body" class="docs-content"></article>
         </section>
       </main>
     </div>

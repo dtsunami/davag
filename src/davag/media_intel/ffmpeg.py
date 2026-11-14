@@ -307,20 +307,6 @@ def generate_contact_sheet(
         raise RuntimeError("ffmpeg not found on PATH")
 
     src = Path(file_path).resolve()
-    info = probe_media(src)
-    total_dur = max(0.5, float(info["duration_sec"]))
-    vid_fps = (info.get("video") or {}).get("fps") or 24.0
-    exact_fps, _, _ = parse_fps(vid_fps)
-
-    s_sec = max(0.0, float(start_sec or 0.0))
-    avail_dur = max(0.5, total_dur - s_sec)
-    w_dur = min(avail_dur, float(duration_sec)) if duration_sec is not None else avail_dur
-
-    c = max(1, min(8, int(cols)))
-    r = max(1, min(8, int(rows)))
-    n_tiles = c * r
-    step = w_dur / n_tiles
-
     if output_path is not None:
         dst = Path(output_path).resolve()
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -328,9 +314,62 @@ def generate_contact_sheet(
         with tempfile.NamedTemporaryFile(prefix="davag_sheet_", suffix=".png", delete=False) as tmp:
             dst = Path(tmp.name)
 
-    # Multi-input fast keyframe seek (`-ss ts -i src`) + burned-in label + `xstack`/`tile`!
-    # Works cleanly even on 3-hour recordings in ~1 second because FFmpeg seeks the container index!
-    timestamps = [round(s_sec + (i + 0.35) * step, 3) for i in range(n_tiles)]
+    # Handle still images (`.png`, `.jpg`, `.webp`, or 1-frame graphics) cleanly without `-ss` seeking!
+    is_still_ext = src.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff")
+    info = probe_media(src)
+    raw_dur = float(info.get("duration_sec") or 0.0)
+    if is_still_ext or raw_dur <= 0.12:
+        res_still = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(src),
+                "-vf",
+                "scale='min(1280,iw)':-2",
+                "-frames:v",
+                "1",
+                str(dst),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if res_still.returncode != 0 or not dst.is_file() or dst.stat().st_size == 0:
+            dst.unlink(missing_ok=True)
+            raise RuntimeError(f"Still image contact sheet failed: {res_still.stderr.strip()}")
+        return {
+            "path": str(dst),
+            "bytes": dst.stat().st_size,
+            "cols": 1,
+            "rows": 1,
+            "tile_count": 1,
+            "start_sec": 0.0,
+            "duration_sec": 0.0,
+            "interval_sec": 0.0,
+            "fps": 0.0,
+            "tiles": [{"tile": 1, "sec": 0.0, "frame": 0, "tc": "00:00:00:00"}],
+        }
+
+    vid_fps = (info.get("video") or {}).get("fps") or 24.0
+    exact_fps, _, _ = parse_fps(vid_fps)
+
+    # Clamp `s_sec` and `ts` strictly below `raw_dur - 0.08` so FFmpeg `-ss` never seeks past EOF!
+    max_seek = max(0.0, raw_dur - 0.08)
+    s_sec = min(max_seek, max(0.0, float(start_sec or 0.0)))
+    avail_dur = max(0.2, raw_dur - s_sec)
+    w_dur = min(avail_dur, float(duration_sec)) if duration_sec is not None else avail_dur
+
+    c = max(1, min(8, int(cols)))
+    r = max(1, min(8, int(rows)))
+    n_tiles = c * r
+    step = w_dur / n_tiles
+
+    timestamps = [round(min(max_seek, s_sec + (i + 0.35) * step), 3) for i in range(n_tiles)]
     tiles_meta: list[dict[str, Any]] = []
 
     cmd: list[str] = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
@@ -340,7 +379,6 @@ def generate_contact_sheet(
     for idx, ts in enumerate(timestamps):
         src_frame = round(ts * exact_fps)
         tc_label = frames_to_tc(src_frame, exact_fps)
-        # Escape colons for FFmpeg drawtext
         esc_label = f"{tc_label} f{src_frame}".replace(":", r"\:")
         tiles_meta.append({"tile": idx + 1, "sec": ts, "frame": src_frame, "tc": tc_label})
 
@@ -360,7 +398,6 @@ def generate_contact_sheet(
 
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
     if res.returncode != 0 or not dst.is_file() or dst.stat().st_size == 0:
-        # Fallback without `drawtext` in case a minimal FFmpeg build lacks libfreetype
         fallback_parts = []
         for idx in range(n_tiles):
             fallback_parts.append(
@@ -370,8 +407,9 @@ def generate_contact_sheet(
         fallback_parts.append(f"{''.join(concat_inputs)} concat=n={n_tiles}:v=1:a=0,tile={c}x{r}:padding=4:margin=4 [outv]")
         cmd_fb = cmd[: cmd.index("-filter_complex")] + ["-filter_complex", ";".join(fallback_parts), "-map", "[outv]", "-frames:v", "1", str(dst)]
         res2 = subprocess.run(cmd_fb, capture_output=True, text=True, timeout=120, check=False)
-        if res2.returncode != 0:
-            raise RuntimeError(f"Contact sheet generation failed: {res.stderr.strip() or res2.stderr.strip()}")
+        if res2.returncode != 0 or not dst.is_file() or dst.stat().st_size == 0:
+            dst.unlink(missing_ok=True)
+            raise RuntimeError(f"Contact sheet generation failed (0 bytes produced): {res.stderr.strip() or res2.stderr.strip()}")
 
     return {
         "path": str(dst),
@@ -514,3 +552,66 @@ def generate_editing_proxy(
         last_err = res.stderr.strip()
 
     raise RuntimeError(f"Editing proxy generation failed: {last_err}")
+
+
+def master_voiceover_audio(
+    file_path: str | Path,
+    *,
+    output_path: str | Path | None = None,
+    target_lufs: float = -14.0,
+    denoise: bool = True,
+) -> dict[str, Any]:
+    """Clean & master a voiceover recording to YouTube broadcast standard (-14 LUFS, -1.5 dBTP, 48kHz PCM WAV).
+
+    Applies 80Hz high-pass rumble removal, optional FFT room-noise reduction (`afftdn`), gentle vocal
+    compression (`acompressor`), and EBU R128 loudness normalization (`loudnorm`).
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found on PATH")
+
+    src = Path(file_path).resolve()
+    if output_path is not None:
+        dst = Path(output_path).resolve()
+    else:
+        dst = src.with_name(f"{src.stem}_vo_master.wav")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    filters = ["highpass=f=80"]
+    if denoise:
+        filters.append("afftdn=nf=-25")
+    filters.extend(
+        [
+            "acompressor=threshold=-20dB:ratio=3:attack=5:release=60:makeup=2",
+            f"loudnorm=I={float(target_lufs):.1f}:TP=-1.5:LRA=11",
+        ]
+    )
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(src),
+        "-vn",
+        "-af",
+        ",".join(filters),
+        "-c:a",
+        "pcm_s24le",
+        "-ar",
+        "48000",
+        str(dst),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
+    if res.returncode != 0 or not dst.is_file():
+        raise RuntimeError(f"Voiceover mastering failed: {res.stderr.strip()}")
+
+    info = probe_media(dst)
+    return {
+        "path": str(dst),
+        "bytes": dst.stat().st_size,
+        "duration_sec": info["duration_sec"],
+        "target_lufs": target_lufs,
+        "denoise": denoise,
+    }

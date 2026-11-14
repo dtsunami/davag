@@ -1,17 +1,20 @@
-# davag
+# davag — Project Grounding & Architectural Decisions
 
 DaVinci Resolve AI editing agent & custom harness (TUI REPL + Web Sidecar GUI).
-See `plan.md` for full architecture and roadmap.
 
 ## Architectural Invariants
 
 1. **Zero third-party dependencies inside Resolve:**
    `src/davag/resolve_ops/` and `src/davag/bridge/` MUST import Python standard library modules only. They execute both inside the external `.venv` (`DirectTransport`) and inside DaVinci Resolve's embedded `fuscript` Python host (`BridgeTransport`).
 2. **Single-owner state, dual views:**
-   `agent/`, `context/`, `providers/`, `session/`, and `server/` must remain TUI-free. Both the terminal REPL and the `--web` / `--host` SSE browser GUI drive the session via `session/dispatch.py` and subscribe via `session/bus.py`.
-3. **Configuration precedence (lowest → highest):**
-   `$DAVAG_HOME/settings.json` → `~/.davai/.env` (read-only API key fallback) → `$DAVAG_HOME/.env` → `./.env` (with `HOME_ONLY_VARS` stripped) → `os.environ` → CLI flags → live session overrides.
-4. **CRLF-preserving `.env` edits:**
-   All `.env` edits go through `config/envfile.py` and `config/profiles.py`, preserving comments (`##` immune prose vs `#` parked settings) and original line endings (`\r\n` vs `\n`) byte-for-byte.
-5. **Safe mutations & undo:**
-   Resolve API mutations do not reliably populate Resolve's UI undo stack. Mutating `dr_ops` batches snapshot the active timeline (`.davag-snap-*`) before applying changes, and `resolve.eval` / `shell` / non-loopback `--yolo` follow strict operator approval gates.
+   `agent/`, `context/`, `providers/`, `session/`, and `server/` remain TUI-free. Both the terminal REPL and the `--web` / `--host` SSE browser GUI drive the session via `session/dispatch.py` and subscribe via `session/bus.py`.
+3. **5-Tier Capability Roles (`--role`, `DAVAG_ROLE`, `/role`):**
+   `reviewer` (strictly read-only) → `logger` (markers, VO scripts, proxies) → `editor` (cuts, transitions, JS/SVG motion overlays, audio master) → `finisher` (Color, Fusion, Deliver, YouTube staging & Flux thumbnails) → `master` (adds approval-gated `resolve.eval`, `shell`, `youtube.upload`, and `destructive` ops). Enforced in both `protocol.md` and `executor.plan_batch`.
+4. **Deterministic Code-Based Motion Overlays (`motion.render_overlay`):**
+   Self-contained HTML/CSS/SVG/Canvas/JS is rendered frame-deterministically via local Headless Chrome/Edge CDP (`window.renderFrame(f, t, dur, fps)` + Web Animations / SMIL scrubbing) with transparent RGBA background into **10-bit ProRes 4444 Straight-Alpha `.mov`** (or RGBA `.png` for static callouts), imported into Resolve's `Overlays` bin, and placed onto `Video 2` at `record_tc`.
+5. **Recorded Resolve 21.2 API Capability & Boundary Decisions (Nov 2026):**
+   - **Covered natively (`41` structured Resolve ops):** In-place trim/slip/move/gap-delete/silence-ripple (`21.1.2+`), transitions & fades (`21.1+`), constant speed/stabilize/SmartReframe, Color LUT/CDL/`GetCDL`/`ApplyAutoColor`/`ApplyGradeFromDRX` (`21.2`), Fairlight LUFS normalization/VoiceIsolation/DialogueLeveler/`GenerateSpeech`, Fusion `Text+` inputs, Subtitle neural generation + `.srt` teleprompter + Fairlight ADR `.csv` cues.
+   - **Accepted Blackmagic Scripting API Gaps (by design):**
+     1. *Interactive Color Wheels / Curves / Qualifiers:* Not exposed by Resolve's scripting API. **Decision:** Author or apply looks via `.cube` LUTs (`color.apply_lut`), ASC-CDL (`color.set_cdl`), Gallery `.drx` PowerGrade stills (`color.grade`), or Resolve 21.2 `ApplyAutoColor`.
+     2. *Nonlinear Speed-Ramp Bezier Curves:* Resolve exposes constant `SetSpeed` (`timeline.set_speed`), not keyframed variable speed curves. **Decision:** Apply constant retimes via `timeline.set_speed` or build motion-graphic timecurves in `motion.render_overlay`.
+     3. *Granular Fairlight Parametric EQ Curves:* Not individually scriptable per band. **Decision:** Use `media.master_vo` (FFmpeg 80Hz HPF + `afftdn` denoise + compressor + `-14 LUFS` EBU R128 WAV), `audio.enhance` (`VoiceIsolation`, `DialogueLeveler`, `-14 LKFS` normalization), or `Project.ApplyFairlightPresetToCurrentTimeline`.

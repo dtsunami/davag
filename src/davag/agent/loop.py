@@ -26,7 +26,7 @@ from davag.providers.base import ProviderAdapter, ProviderError, StreamEvent, co
 from davag.transport.base import ResolveTransport
 
 from .executor import ApprovalDecision, OpCall, execute_batch, format_batch_results
-from .grounding import poll_live_resolve_banner
+from .grounding import format_live_timeline_state, poll_live_resolve_banner
 from .journal import Journal
 from .parser import ParseError, extract_turn
 from .sandbox import Sandbox
@@ -179,6 +179,7 @@ class Agent(EventEmitter):
 
         self.busy = False
         self._cancel_event: asyncio.Event | None = None
+        self._active_user_prompt: str = ""
         self.steers: list[str] = []
         self._last_resolve_banner: str | None = None
 
@@ -198,10 +199,14 @@ class Agent(EventEmitter):
             self._cancel_event.set()
 
     def steer(self, text: str) -> bool:
-        if not self.busy or not text.strip():
+        cleaned = text.strip()
+        if not self.busy or not cleaned:
             return False
-        self.steers.append(text.strip())
-        self.emit("steer-queued", {"text": text.strip(), "queued": len(self.steers)})
+        # Ignore accidental double-submit of the exact prompt already running
+        if cleaned == self._active_user_prompt or (self.steers and self.steers[-1] == cleaned):
+            return False
+        self.steers.append(cleaned)
+        self.emit("steer-queued", {"text": cleaned, "queued": len(self.steers)})
         return True
 
     def _drain_steers(self) -> bool:
@@ -239,7 +244,19 @@ class Agent(EventEmitter):
         self, cancel_ev: asyncio.Event, *, effort_override: str | None = None
     ) -> dict[str, Any]:
         provider = self.make_provider(self.cfg, effort_override=effort_override)
+        for seg in list(self.ledger.segments):
+            if seg.part.get("type") == "image" and not seg.part.get("data"):
+                self.ledger.drop(seg.id)
         messages = self.ledger.to_messages()
+
+        # Ephemerally attach compact `[Live Timeline State]` ONLY to the final outgoing user message!
+        # Earlier `messages` remain 100% byte-identical for full prompt-cache hits and zero history bloat.
+        live_tl = await format_live_timeline_state(self.transport)
+        if live_tl and messages and messages[-1]["role"] == "user":
+            messages[-1] = {
+                "role": "user",
+                "content": [*messages[-1]["content"], {"type": "text", "text": live_tl}],
+            }
 
         text_chunks: list[str] = []
         think_chunks: list[str] = []
@@ -364,6 +381,7 @@ class Agent(EventEmitter):
             raise RuntimeError("Agent is already running a turn")
 
         self.busy = True
+        self._active_user_prompt = user_prompt.strip()
         cancel_ev = asyncio.Event()
         self._cancel_event = cancel_ev
 
@@ -548,13 +566,26 @@ class Agent(EventEmitter):
                     m_kind = m_item["kind"]
                     m_path = m_item["path"]
                     if m_kind == "image" and self.cfg.model.vision:
-                        img = load_image_part(m_path)
-                        self.ledger.add(
-                            seg_type="media",
-                            label=f"viewer still ({img['name']})",
-                            role="user",
-                            image=img,
-                        )
+                        try:
+                            img = load_image_part(m_path)
+                            self.ledger.add(
+                                seg_type="media",
+                                label=f"viewer still ({img['name']})",
+                                role="user",
+                                image=img,
+                            )
+                            # Keep at most 6 unpinned auto-grabbed stills in active context so 20+ grabs don't bloat turns!
+                            auto_stills = [
+                                s
+                                for s in self.ledger.segments
+                                if s.type == "media"
+                                and not s.pinned
+                                and s.label.startswith("viewer still (")
+                            ]
+                            for old_s in auto_stills[:-6]:
+                                self.ledger.drop(old_s.id)
+                        except Exception as img_err:  # noqa: BLE001
+                            self.emit("warning", {"message": f"Skipped unreadable image {m_path}: {img_err}"})
                     elif m_kind == "video":
                         if self.cfg.model.video:
                             vid = load_video_part(m_path)
@@ -596,4 +627,9 @@ class Agent(EventEmitter):
             return {"status": "max_steps"}
         finally:
             self.busy = False
+            self._active_user_prompt = ""
             self._cancel_event = None
+            if self.session_log is not None:
+                self.session_log.update_totals(
+                    self.stats, provider=self.cfg.provider, model_id=self.cfg.model.id
+                )

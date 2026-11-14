@@ -222,6 +222,8 @@ class Config:
     ro_dirs: list[Path] = field(default_factory=list)
     agents_files: list[str] = field(default_factory=list)
     agents_budget: int | None = None
+    role: str = "master"
+    image_model: str = "black-forest-labs/flux.2-pro"
     index_provider: str | None = None
     index_model: str | None = None
     keys: dict[str, str | None] = field(default_factory=dict)
@@ -305,8 +307,14 @@ def load_config(
                 k: v for k, v in davai_vars.items() if k in DAVAI_FALLBACK_KEYS and v
             }
             for blk in parse_blocks(davai_raw)["blocks"]:
+                # Skip custom-endpoint blocks (Mistral/ElevenLabs/local servers) when harvesting
+                # OpenAI keys so a non-OpenAI `sk_...` key is never sent to api.openai.com!
+                blk_var_names = {v["name"] for v in blk["vars"] if not v["shadowed"]}
+                has_custom_base = bool(blk_var_names & {"DAVAI_BASE_URL", "OPENAI_BASE_URL", "DAVAG_BASE_URL"})
                 for v in blk["vars"]:
                     if v["shadowed"] or v["name"] not in DAVAI_FALLBACK_KEYS:
+                        continue
+                    if has_custom_base and v["name"] in ("OPENAI_API_KEY", "DAVAI_OPENAI_API_KEY"):
                         continue
                     if v["name"] not in adopted:
                         val_parsed = parse_dotenv(f"{v['name']}={v['value']}").get(v["name"], "")
@@ -362,7 +370,7 @@ def load_config(
         )
     )
 
-    provider = merged.get("DAVAG_PROVIDER", "anthropic").strip().lower()
+    provider = merged.get("DAVAG_PROVIDER", "gemini").strip().lower()
     if provider not in PROVIDERS:
         raise ValueError(
             f'Unknown DAVAG_PROVIDER="{provider}" (expected one of: {", ".join(PROVIDERS)}).'
@@ -447,6 +455,11 @@ def load_config(
     agents_md_raw = merged.get("DAVAG_AGENTS_MD", "").strip()
     agents_files = [p.strip() for p in agents_md_raw.split(os.pathsep) if p.strip()]
     agents_budget = _parse_positive_int(merged.get("DAVAG_AGENTS_BUDGET"), "DAVAG_AGENTS_BUDGET")
+    role = merged.get("DAVAG_ROLE", "master").strip().lower() or "master"
+    from davag.agent.roles import ROLES
+    if role not in ROLES:
+        raise ValueError(f'Unknown DAVAG_ROLE="{role}" (expected one of: {", ".join(ROLES)}).')
+    image_model = merged.get("DAVAG_IMAGE_MODEL", "black-forest-labs/flux.2-pro").strip() or "black-forest-labs/flux.2-pro"
     index_provider = merged.get("DAVAG_INDEX_PROVIDER", "").strip().lower() or None
     index_model = merged.get("DAVAG_INDEX_MODEL", "").strip() or None
 
@@ -493,6 +506,8 @@ def load_config(
         ro_dirs=ro_dirs,
         agents_files=agents_files,
         agents_budget=agents_budget,
+        role=role,
+        image_model=image_model,
         index_provider=index_provider,
         index_model=index_model,
         keys=keys,

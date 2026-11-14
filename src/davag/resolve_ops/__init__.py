@@ -5,6 +5,7 @@ embedded `fuscript` Python host (`BridgeTransport`).
 """
 
 from . import color_fusion_ops as _color_fusion_ops  # noqa: F401
+from . import edit21_ops as _edit21_ops  # noqa: F401
 from . import eval_op as _eval_op  # noqa: F401
 from . import marker_ops as _marker_ops  # noqa: F401
 from . import mediapool_ops as _mediapool_ops  # noqa: F401

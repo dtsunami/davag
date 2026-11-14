@@ -53,3 +53,22 @@ def test_web_client_dom_ids_and_hidden_rule() -> None:
     js_dollar_ids = set(re.findall(r"\$\('([^']+)'\)", js))
     missing = js_dollar_ids - html_ids
     assert not missing, f"app.js references missing HTML element IDs: {missing}"
+
+
+def test_repl_history_loads_and_persists_across_sessions(tmp_path: Path) -> None:
+    from davag.session.history import PromptHistory
+    from davag.ui.tui import DavagPtHistory
+
+    store1 = PromptHistory(tmp_path)
+    pt1 = DavagPtHistory(store1)
+    pt1.append_string("cut first 30 seconds")
+    pt1.append_string("/model opus")  # in-memory for session, excluded from history.jsonl
+    pt1.append_string("sh git status")  # excluded from history.jsonl
+    pt1.append_string("make a 10 min video")
+
+    # Simulate fresh REPL relaunch reading ~/.davag/history.jsonl
+    store2 = PromptHistory(tmp_path)
+    pt2 = DavagPtHistory(store2)
+    loaded = list(pt2.load_history_strings())
+    # Newest-first for Up-Arrow recall!
+    assert loaded == ["make a 10 min video", "cut first 30 seconds"]

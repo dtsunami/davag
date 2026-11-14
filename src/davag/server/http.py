@@ -1,41 +1,84 @@
-"""Asyncio `aiohttp` HTTP + SSE Web Sidecar (`davag.server.http`).
+"""Modular FastAPI + Uvicorn Web Sidecar (`davag.server.http`).
 
-Mirrors `davai/src/server/http.js`:
-- Unauthenticated static shell (`/`, `/assets/*`, `/favicon.svg`) so browser shows token prompt cleanly.
-- Bearer token required on every `/api/*` endpoint.
-- SSE stream on `GET /api/events` with `Last-Event-ID` / `?since=` replay from `SessionBus`.
-- REST endpoints for submit, cancel, raced approval, Resolve live inspector + frame grab,
-  context management, live model/key/.env switching, and artifact download.
+Replaces the legacy 1,000-line `aiohttp.web` closure monolith with clean typed FastAPI routers:
+- `routes_core.py`: session state, SSE stream (`Last-Event-ID` / `?since=` replay), submit/cancel/approve,
+  context ledger, prompt editor, model/key/.env profiles, roles, artifacts, and `/api/docs`.
+- `routes_resolve.py`: DaVinci Resolve Live Inspector, Clip Studio, Voiceover Teleprompter, & media stills.
+- `routes_overlays.py`: Interactive visual timeline, lazy-loaded disk-cached frame thumbnails,
+  drag-to-adjust markers/overlays, and ISO SVG QR + ProRes 4444 motion overlay rendering.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
+import contextlib
+import socket
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from aiohttp import web
+import uvicorn
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
 
-from davag import __version__
-from davag.context.compact import compact_ledger
-from davag.context.media import load_image_part
 from davag.session.bootstrap import Session
-from davag.session.keys_ctl import clear_provider_key, key_state, set_provider_key
-from davag.session.models_ctl import apply_model_change, provider_catalog_state
-from davag.session.profiles_ctl import choose_profile_var, profile_state, switch_profile
-from davag.ui.commands import command_list
 
 from .auth import assert_safe_bind, make_web_token, read_request_token, token_matches
+from .routes_core import router as core_router
+from .routes_overlays import router as overlays_router
+from .routes_resolve import router as resolve_router
+from .state import WebState
 
 WEB_STATIC_DIR = Path(__file__).resolve().parents[1] / "ui" / "web"
+_PROACTOR_PATCHED = False
+
+
+def is_benign_socket_disconnect(exc: BaseException | None) -> bool:
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return True
+    return bool(isinstance(exc, OSError) and getattr(exc, "winerror", None) in (64, 121, 995, 10038, 10053, 10054))
+
+
+def install_win32_proactor_reset_guard() -> None:
+    """Fix CPython Win32 Proactor `_call_connection_lost` raising unhandled `WinError 10054`
+    on `self._sock.shutdown(SHUT_RDWR)` when browsers abort in-flight `<img>` / `<video>` sockets
+    (which otherwise leaks the socket AND triggers prompt_toolkit's blocking 'Press ENTER' prompt!).
+    """
+    global _PROACTOR_PATCHED
+    if _PROACTOR_PATCHED or sys.platform != "win32":
+        return
+    _PROACTOR_PATCHED = True
+    with contextlib.suppress(Exception):
+        from asyncio import proactor_events
+
+        cls = proactor_events._ProactorBasePipeTransport
+
+        def _safe_call_connection_lost(self: Any, exc: Exception | None) -> None:
+            if self._called_connection_lost:
+                return
+            try:
+                self._protocol.connection_lost(exc)
+            finally:
+                if hasattr(self._sock, "shutdown") and self._sock.fileno() != -1:
+                    with contextlib.suppress(OSError):
+                        self._sock.shutdown(socket.SHUT_RDWR)
+                if self._sock is not None:
+                    with contextlib.suppress(OSError):
+                        self._sock.close()
+                    self._sock = None
+                server = self._server
+                if server is not None:
+                    server._detach(self)
+                    self._server = None
+                self._called_connection_lost = True
+
+        cls._call_connection_lost = _safe_call_connection_lost  # type: ignore[method-assign]
 
 
 def _detect_lan_ipv4() -> str | None:
-    import socket
-
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("10.255.255.255", 1))
@@ -52,7 +95,9 @@ class RunningWebServer:
     host: str
     port: int
     token: str
-    runner: web.AppRunner
+    server: uvicorn.Server
+    serve_task: asyncio.Task[None]
+    sock: socket.socket
     url: str
     auth_url: str
     lan_auth_url: str | None
@@ -63,30 +108,54 @@ class RunningWebServer:
         self.shutdown_event.set()
         for q in list(self.sse_queues):
             q.put_nowait(None)
-        await self.runner.cleanup()
+        self.server.should_exit = True
+        with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+            await asyncio.wait_for(self.serve_task, timeout=3.0)
+        with contextlib.suppress(OSError):
+            self.sock.close()
 
 
-def _describe_session(session: Session) -> dict[str, Any]:
-    cfg = session.cfg
-    return {
-        "version": __version__,
-        "session_id": session.log.id,
-        "cwd": str(cfg.cwd),
-        "provider": cfg.provider,
-        "model": cfg.model.id,
-        "model_label": cfg.model.label,
-        "video_capable": cfg.model.video,
-        "effort": cfg.effort,
-        "yolo": cfg.yolo,
-        "resolve_connected": session.transport is not None,
-        "resolve_mode": session.transport.mode if session.transport else None,
-        "stats": dict(session.agent.stats),
-        "context": {
-            "tokens": session.ledger.total_tokens,
-            "limit": session.ledger.limit,
-            "fraction": round(session.ledger.usage_fraction, 4),
-        },
-    }
+def create_fastapi_app(state: WebState) -> FastAPI:
+    app = FastAPI(title="davag Web Studio", docs_url=None, redoc_url=None, openapi_url="/api/openapi.json")
+    app.state.davag = state
+
+    @app.middleware("http")
+    async def bearer_auth_middleware(req: Request, call_next: Callable[[Request], Any]) -> Response:
+        path = req.url.path
+        if path == "/" or path.startswith("/assets/") or path in ("/favicon.svg", "/favicon.ico"):
+            res_open: Response = await call_next(req)
+            return res_open
+
+        allow_q = (
+            path in ("/api/events", "/api/overlays/thumb")
+            or path.startswith(("/api/media/", "/api/overlays/preview/", "/api/overlays/render-video/"))
+        )
+        given = read_request_token(req, allow_query=allow_q)
+        if not token_matches(state.secret, given):
+            return JSONResponse({"error": "bad or missing token"}, status_code=401)
+        res_authed: Response = await call_next(req)
+        return res_authed
+
+    @app.get("/", include_in_schema=False)
+    async def serve_index() -> FileResponse:
+        return FileResponse(WEB_STATIC_DIR / "index.html")
+
+    @app.get("/favicon.svg", include_in_schema=False)
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def serve_favicon() -> FileResponse:
+        return FileResponse(WEB_STATIC_DIR / "favicon.svg")
+
+    @app.get("/assets/{name}", include_in_schema=False)
+    async def serve_asset(name: str) -> Response:
+        target = (WEB_STATIC_DIR / Path(name).name).resolve()
+        if target.parent != WEB_STATIC_DIR or not target.is_file():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(target)
+
+    app.include_router(core_router)
+    app.include_router(resolve_router)
+    app.include_router(overlays_router)
+    return app
 
 
 async def start_web_server(
@@ -98,454 +167,58 @@ async def start_web_server(
     token: str | None = None,
 ) -> RunningWebServer:
     assert_safe_bind(host=host, yolo=session.cfg.yolo)
+    install_win32_proactor_reset_guard()
+    loop = asyncio.get_running_loop()
+    prev_eh = loop.get_exception_handler()
+
+    def _loop_eh(lp: asyncio.AbstractEventLoop, ctx: dict[str, Any]) -> None:
+        if is_benign_socket_disconnect(ctx.get("exception")):
+            return
+        if prev_eh is not None:
+            prev_eh(lp, ctx)
+        else:
+            lp.default_exception_handler(ctx)
+
+    loop.set_exception_handler(_loop_eh)
     secret = token or session.cfg.web_token or make_web_token()
-    bg_tasks: set[asyncio.Task[Any]] = set()
-    sse_queues: set[asyncio.Queue[dict[str, Any] | None]] = set()
-    shutdown_ev = asyncio.Event()
-    grab_files: dict[str, Path] = {}  # id -> Path for safe viewer still serving
-
-    @web.middleware
-    async def auth_middleware(req: web.Request, handler: Any) -> web.StreamResponse:
-        path = req.path
-        is_open = (
-            path == "/"
-            or path.startswith("/assets/")
-            or path in ("/favicon.svg", "/favicon.ico")
-        )
-        if is_open:
-            return await handler(req)
-
-        allow_q = path == "/api/events" or path.startswith("/api/media/")
-        given = read_request_token(req, allow_query=allow_q)
-        if not token_matches(secret, given):
-            return web.json_response({"error": "bad or missing token"}, status=401)
-        return await handler(req)
-
-    app = web.Application(middlewares=[auth_middleware])
-
-    async def serve_index(_req: web.Request) -> web.FileResponse:
-        return web.FileResponse(WEB_STATIC_DIR / "index.html")
-
-    async def serve_favicon(_req: web.Request) -> web.FileResponse:
-        return web.FileResponse(WEB_STATIC_DIR / "favicon.svg")
-
-    async def serve_asset(req: web.Request) -> web.StreamResponse:
-        name = req.match_info["name"]
-        target = (WEB_STATIC_DIR / name).resolve()
-        if target.parent != WEB_STATIC_DIR or not target.is_file():
-            return web.json_response({"error": "not found"}, status=404)
-        return web.FileResponse(target)
-
-    async def api_session(_req: web.Request) -> web.Response:
-        return web.json_response(_describe_session(session))
-
-    async def api_commands(_req: web.Request) -> web.Response:
-        return web.json_response({"commands": command_list()})
-
-    async def api_perf(_req: web.Request) -> web.Response:
-        return web.json_response(session.perf.to_dict())
-
-    async def api_events(req: web.Request) -> web.StreamResponse:
-        resp = web.StreamResponse(
-            status=200,
-            reason="OK",
-            headers={
-                "Content-Type": "text/event-stream; charset=utf-8",
-                "Cache-Control": "no-cache, no-transform",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-        await resp.prepare(req)
-
-        async def _send_sse(ev_type: str, data: Any, seq_id: int | None = None) -> None:
-            chunks = []
-            if seq_id is not None:
-                chunks.append(f"id: {seq_id}\n")
-            chunks.append(f"event: {ev_type}\n")
-            chunks.append(f"data: {json.dumps(data, ensure_ascii=False)}\n\n")
-            await resp.write("".join(chunks).encode("utf-8"))
-
-        last_raw = req.headers.get("Last-Event-ID") or req.query.get("since") or "0"
-        last_seq = int(last_raw) if str(last_raw).isdigit() else 0
-        missed, gap = session.bus.since(last_seq)
-
-        hello = {**_describe_session(session), **session.bus.snapshot(), "gap": gap}
-        await _send_sse("hello", hello)
-        for ev in missed:
-            await _send_sse(ev["type"], ev["data"], ev["seq"])
-
-        q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-        sse_queues.add(q)
-        unsub = session.bus.subscribe(lambda ev: q.put_nowait(ev))
-
-        try:
-            while not shutdown_ev.is_set():
-                try:
-                    ev = await asyncio.wait_for(q.get(), timeout=15.0)
-                    if ev is None:
-                        break
-                    await _send_sse(ev["type"], ev["data"], ev["seq"])
-                except TimeoutError:
-                    await resp.write(b": ping\n\n")
-        except (ConnectionResetError, asyncio.CancelledError, OSError):
-            pass
-        finally:
-            sse_queues.discard(q)
-            unsub()
-        return resp
-
-    async def api_submit(req: web.Request) -> web.Response:
-        body = await req.json()
-        text = str(body.get("text", "")).strip()
-        if not text:
-            return web.json_response({"error": "empty text"}, status=400)
-
-        task = asyncio.create_task(submit_fn(text, "web"))
-        bg_tasks.add(task)
-        task.add_done_callback(bg_tasks.discard)
-        return web.json_response({"ok": True})
-
-    async def api_cancel(_req: web.Request) -> web.Response:
-        session.agent.cancel()
-        return web.json_response({"ok": True})
-
-    async def api_approve(req: web.Request) -> web.Response:
-        body = await req.json()
-        ap_id = str(body.get("id", ""))
-        decision = {
-            "allow": bool(body.get("allow", False)),
-            "reason": body.get("reason"),
-            "checkpoint_first": bool(body.get("checkpoint_first", False)),
-        }
-        settled = session.bus.resolve_approval(ap_id, decision)
-        return web.json_response({"ok": True, "settled": settled, "stale": not settled})
-
-    def _register_media_file(p: Path) -> str:
-        resolved = p.resolve()
-        for existing_id, existing_p in grab_files.items():
-            if existing_p == resolved:
-                return f"/api/media/still/{existing_id}"
-        mid = f"m{len(grab_files) + 1}"
-        grab_files[mid] = resolved
-        return f"/api/media/still/{mid}"
+    state = WebState(session=session, submit_fn=submit_fn, secret=secret)
 
     def _on_bus_media(ev: dict[str, Any]) -> None:
-        # Automatically expose contact sheets & proxy MP4s generated by TUI/Agent to the Web GUI drawer!
         if ev["type"] == "media-preview":
             d = ev["data"]
             p = Path(str(d["path"]))
             if p.is_file():
-                url = _register_media_file(p)
+                url = state.register_media_file(p)
                 session.bus.publish("viewer-media", {"kind": d["kind"], "url": url, "title": d.get("title", p.name)})
         elif ev["type"] == "ops-result":
             for m in (ev["data"] or {}).get("attached_media") or []:
                 p = Path(str(m.get("path", "")))
                 if p.is_file():
                     kind = "video" if m["kind"] == "video" else "image"
-                    url = _register_media_file(p)
+                    url = state.register_media_file(p)
                     session.bus.publish("viewer-media", {"kind": kind, "url": url, "title": p.name})
 
     session.bus.subscribe(_on_bus_media)
 
-    # --- Resolve Live Inspector & Frame Grab ---
-    async def api_resolve_state(_req: web.Request) -> web.Response:
-        from davag.media_intel.digest import load_clip_digest
+    app = create_fastapi_app(state)
 
-        if session.transport is None:
-            return web.json_response({"connected": False, "note": session.resolve_connect_note})
-        try:
-            status = await session.transport.call("resolve.status", timeout=4.0)
-            tree = None
-            clips_list = []
-            tl_state = None
-            if status.get("project"):
-                tree = await session.transport.call("mediapool.tree", timeout=4.0)
-                c_res = await session.transport.call("mediapool.clips", {"recursive": True}, timeout=4.0)
-                for c in c_res.get("clips") or []:
-                    dig = load_clip_digest(session.cfg.home / "cache", c["file_path"]) if c.get("file_path") else None
-                    proxy_url = None
-                    if c.get("proxy_path") and Path(str(c["proxy_path"])).is_file():
-                        proxy_url = _register_media_file(Path(str(c["proxy_path"])))
-                    sheet_url = None
-                    if dig and dig.get("contact_sheet_path") and Path(str(dig["contact_sheet_path"])).is_file():
-                        sheet_url = _register_media_file(Path(str(dig["contact_sheet_path"])))
-                    clips_list.append(
-                        {
-                            **c,
-                            "digest": dig.get("summary") if dig else None,
-                            "scout_model": dig.get("scout_model") if dig else None,
-                            "proxy_url": proxy_url,
-                            "sheet_url": sheet_url,
-                        }
-                    )
-            if status.get("timeline"):
-                tl_state = await session.transport.call("timeline.get_state", timeout=4.0)
-            return web.json_response(
-                {
-                    "connected": True,
-                    "status": status,
-                    "mediapool": tree,
-                    "clips": clips_list,
-                    "timeline": tl_state,
-                    "checkpoints": [
-                        {
-                            "seq": c.seq,
-                            "original_name": c.original_name,
-                            "snapshot_name": c.snapshot_name,
-                            "ts": c.ts,
-                        }
-                        for c in session.journal.resolve_checkpoints
-                    ],
-                }
-            )
-        except Exception as err:  # noqa: BLE001
-            return web.json_response({"connected": False, "error": str(err)})
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.setblocking(False)
+    actual_port = int(sock.getsockname()[1])
 
-    async def api_resolve_reconnect(req: web.Request) -> web.Response:
-        body = await req.json()
-        mode = body.get("mode")
-        try:
-            st = await session.reconnect_resolve(mode)
-            return web.json_response({"ok": True, "status": st})
-        except Exception as err:  # noqa: BLE001
-            return web.json_response({"ok": False, "error": str(err)}, status=400)
+    uv_cfg = uvicorn.Config(app, host=host, port=actual_port, log_level="warning", access_log=False)
+    server = uvicorn.Server(uv_cfg)
+    # Prevent uvicorn from installing OS signal handlers when embedded inside prompt_toolkit REPL!
+    server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
+    serve_task = asyncio.create_task(server.serve(sockets=[sock]))
 
-    async def api_resolve_grab(req: web.Request) -> web.Response:
-        if session.transport is None:
-            return web.json_response({"error": "DaVinci Resolve is not connected"}, status=400)
-        body = await req.json()
-        attach = bool(body.get("attach", True))
-        params: dict[str, Any] = {}
-        if body.get("tc"):
-            params["tc"] = str(body["tc"])
-        try:
-            still = await session.transport.call("timeline.grab_still", params)
-            p = Path(still["path"]).resolve()
-            still_id = f"s{len(grab_files) + 1}"
-            grab_files[still_id] = p
-            if attach and session.cfg.model.vision:
-                img = load_image_part(p)
-                session.ledger.add(
-                    seg_type="media",
-                    label=f"viewer frame @ {still.get('playhead_tc')}",
-                    role="user",
-                    image=img,
-                )
-            url = f"/api/media/still/{still_id}"
-            session.bus.publish(
-                "viewer-still",
-                {"url": url, "playhead_tc": still.get("playhead_tc"), "attached": attach},
-            )
-            return web.json_response({"ok": True, "url": url, "playhead_tc": still.get("playhead_tc")})
-        except Exception as err:  # noqa: BLE001
-            return web.json_response({"error": str(err)}, status=400)
-
-    async def api_serve_still(req: web.Request) -> web.StreamResponse:
-        sid = req.match_info["id"]
-        p = grab_files.get(sid)
-        if p is None or not p.is_file():
-            return web.json_response({"error": "not found"}, status=404)
-        return web.FileResponse(p)
-
-    async def api_resolve_undo(_req: web.Request) -> web.Response:
-        if session.transport is None:
-            return web.json_response({"error": "Resolve not connected"}, status=400)
-        try:
-            res = await session.journal.undo_last_resolve(session.transport)
-            session.bus.publish("transcript", {"type": "notice", "message": f"Restored timeline '{res['restored_timeline']}'", "origin": "web"})
-            return web.json_response({"ok": True, **res})
-        except Exception as err:  # noqa: BLE001
-            return web.json_response({"error": str(err)}, status=400)
-
-    # --- Context Endpoints ---
-    async def api_context_get(_req: web.Request) -> web.Response:
-        led = session.ledger
-        return web.json_response(
-            {
-                "system_tokens": led.system_tokens,
-                "total_tokens": led.total_tokens,
-                "limit": led.limit,
-                "fraction": round(led.usage_fraction, 4),
-                "segments": [s.to_summary_dict() for s in led.segments],
-            }
-        )
-
-    async def api_context_drop(req: web.Request) -> web.Response:
-        body = await req.json()
-        ok = session.ledger.drop(int(body["id"]))
-        return web.json_response({"ok": ok})
-
-    async def api_context_pin(req: web.Request) -> web.Response:
-        body = await req.json()
-        pinned = session.ledger.toggle_pin(int(body["id"]), body.get("pinned"))
-        return web.json_response({"ok": True, "pinned": pinned})
-
-    async def api_compact(_req: web.Request) -> web.Response:
-        res = await compact_ledger(session.ledger)
-        return web.json_response(res)
-
-    # --- Prompts & System Prefix Editor (matches davai /api/prompts*) ---
-    async def api_prompts_get(_req: web.Request) -> web.Response:
-        from davag.session.promptedit import prompt_editor_state
-
-        return web.json_response(prompt_editor_state(session))
-
-    async def api_prompts_save(req: web.Request) -> web.Response:
-        from davag.session.promptedit import save_prompt_override
-
-        body = await req.json()
-        try:
-            res = save_prompt_override(
-                session,
-                key=str(body["key"]),
-                text=str(body["text"]),
-                layer=str(body.get("layer", "project")),
-            )
-            return web.json_response({"ok": True, **res})
-        except Exception as err:  # noqa: BLE001
-            return web.json_response({"error": str(err)}, status=400)
-
-    async def api_prompts_revert(req: web.Request) -> web.Response:
-        from davag.session.promptedit import revert_prompt_override
-
-        body = await req.json()
-        try:
-            res = revert_prompt_override(
-                session,
-                key=str(body["key"]),
-                layer=str(body.get("layer", "project")),
-            )
-            return web.json_response({"ok": True, **res})
-        except Exception as err:  # noqa: BLE001
-            return web.json_response({"error": str(err)}, status=400)
-
-    async def api_prompts_apply(_req: web.Request) -> web.Response:
-        from davag.session.promptedit import stage_prompt_apply
-
-        try:
-            res = stage_prompt_apply(session)
-            return web.json_response({"ok": True, **res})
-        except Exception as err:  # noqa: BLE001
-            return web.json_response({"error": str(err)}, status=400)
-
-    # --- Models, Keys & .env Profiles ---
-    async def api_models_get(_req: web.Request) -> web.Response:
-        return web.json_response(provider_catalog_state(session))
-
-    async def api_model_post(req: web.Request) -> web.Response:
-        body = await req.json()
-        try:
-            res = apply_model_change(
-                session,
-                provider=body.get("provider"),
-                model_id=body.get("model"),
-                effort=body.get("effort"),
-                persist=bool(body.get("persist", False)),
-            )
-            return web.json_response({"ok": True, **res})
-        except ValueError as err:
-            return web.json_response({"error": str(err)}, status=400)
-
-    async def api_keys_get(_req: web.Request) -> web.Response:
-        return web.json_response({"providers": key_state(session)})
-
-    async def api_keys_post(req: web.Request) -> web.Response:
-        body = await req.json()
-        prov = str(body.get("provider", ""))
-        if body.get("clear"):
-            res = clear_provider_key(session, prov, save=bool(body.get("save", False)))
-            return web.json_response({"ok": True, **res})
-        try:
-            res = set_provider_key(
-                session, prov, str(body.get("key", "")), save=bool(body.get("save", False))
-            )
-            return web.json_response({"ok": True, **res})
-        except ValueError as err:
-            return web.json_response({"error": str(err)}, status=400)
-
-    async def api_env_get(_req: web.Request) -> web.Response:
-        return web.json_response(profile_state(session))
-
-    async def api_env_post(req: web.Request) -> web.Response:
-        body = await req.json()
-        try:
-            if body.get("var_name"):
-                st = choose_profile_var(
-                    session,
-                    str(body["block"]),
-                    str(body["var_name"]),
-                    line=body.get("line"),
-                    value=body.get("value"),
-                )
-            else:
-                blk = body.get("block")
-                st = switch_profile(session, None if blk in (None, "", "off") else str(blk))
-            return web.json_response({"ok": True, **st})
-        except Exception as err:  # noqa: BLE001
-            return web.json_response({"error": str(err)}, status=400)
-
-    # --- Artifacts ---
-    async def api_artifacts_list(_req: web.Request) -> web.Response:
-        return web.json_response({"artifacts": [a.to_meta_dict() for a in session.artifacts.items]})
-
-    async def api_artifact_get(req: web.Request) -> web.Response:
-        aid = int(req.match_info["id"])
-        art = session.artifacts.get(aid)
-        if art is None:
-            return web.json_response({"error": "not found"}, status=404)
-        return web.json_response({**art.to_meta_dict(), "body": art.body})
-
-    app.router.add_get("/", serve_index)
-    app.router.add_get("/favicon.svg", serve_favicon)
-    app.router.add_get("/favicon.ico", serve_favicon)
-    app.router.add_get("/assets/{name}", serve_asset)
-
-    app.router.add_get("/api/session", api_session)
-    app.router.add_get("/api/commands", api_commands)
-    app.router.add_get("/api/perf", api_perf)
-    app.router.add_get("/api/events", api_events)
-    app.router.add_post("/api/submit", api_submit)
-    app.router.add_post("/api/cancel", api_cancel)
-    app.router.add_post("/api/approve", api_approve)
-
-    app.router.add_get("/api/resolve", api_resolve_state)
-    app.router.add_post("/api/resolve/reconnect", api_resolve_reconnect)
-    app.router.add_post("/api/resolve/grab", api_resolve_grab)
-    app.router.add_post("/api/resolve/undo", api_resolve_undo)
-    app.router.add_get("/api/media/still/{id}", api_serve_still)
-
-    app.router.add_get("/api/context", api_context_get)
-    app.router.add_post("/api/context/drop", api_context_drop)
-    app.router.add_post("/api/context/pin", api_context_pin)
-    app.router.add_post("/api/compact", api_compact)
-
-    app.router.add_get("/api/prompts", api_prompts_get)
-    app.router.add_post("/api/prompts/save", api_prompts_save)
-    app.router.add_post("/api/prompts/revert", api_prompts_revert)
-    app.router.add_post("/api/prompts/apply", api_prompts_apply)
-
-    app.router.add_get("/api/models", api_models_get)
-    app.router.add_post("/api/model", api_model_post)
-    app.router.add_get("/api/keys", api_keys_get)
-    app.router.add_post("/api/keys", api_keys_post)
-    app.router.add_get("/api/env", api_env_get)
-    app.router.add_post("/api/env", api_env_post)
-
-    app.router.add_get("/api/artifacts", api_artifacts_list)
-    app.router.add_get("/api/artifact/{id}", api_artifact_get)
-
-    runner = web.AppRunner(app, access_log=None)
-    await runner.setup()
-    site = web.TCPSite(runner, host=host, port=port)
-    await site.start()
-
-    # Resolve actual port if port=0 was passed
-    actual_port = port
-    if site._server and site._server.sockets:
-        actual_port = int(site._server.sockets[0].getsockname()[1])
-
-    from urllib.parse import quote
+    for _ in range(100):
+        if server.started or serve_task.done():
+            break
+        await asyncio.sleep(0.01)
 
     disp_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     url = f"http://{disp_host}:{actual_port}"
@@ -562,10 +235,12 @@ async def start_web_server(
         host=host,
         port=actual_port,
         token=secret,
-        runner=runner,
+        server=server,
+        serve_task=serve_task,
+        sock=sock,
         url=url,
         auth_url=auth_url,
         lan_auth_url=lan_auth_url,
-        shutdown_event=shutdown_ev,
-        sse_queues=sse_queues,
+        shutdown_event=state.shutdown_ev,
+        sse_queues=state.sse_queues,
     )
