@@ -45,6 +45,7 @@
         <nav class="tabs">
           <button class="tab active" data-tab="chat">chat</button>
           <button class="tab" data-tab="timeline">🎬 timeline</button>
+          <button class="tab" data-tab="actions">⏪ actions <span id="hdr-act-count" class="act-count-pill" hidden>0</span></button>
           <button class="tab" data-tab="resolve">resolve</button>
           <button class="tab" data-tab="context">context</button>
           <button class="tab" data-tab="perf">perf</button>
@@ -61,7 +62,8 @@
             <span id="strip-summary" class="muted">DaVinci Resolve: checking…</span>
             <span class="spacer"></span>
             <button id="btn-grab-frame" class="btn small" title="Export current Resolve viewer frame & attach to LLM context">📸 Grab Frame</button>
-            <button id="btn-undo-tl" class="btn small" title="Restore previous .davag-snap timeline checkpoint">↩ Undo Cut</button>
+            <button id="btn-undo-tl" class="btn small" title="Undo last action (Ctrl+Z)" disabled>↩ Undo</button>
+            <button id="btn-redo-tl" class="btn small" title="Redo next undone action (Ctrl+Y)" disabled>↪ Redo</button>
           </div>
           <div id="viewer-drawer" class="viewer-drawer" hidden>
             <img id="viewer-img" alt="Resolve Viewer / Contact Sheet" hidden />
@@ -119,6 +121,9 @@
                 <button type="button" id="btn-add-note" class="btn small flag-tool yellow" title="Drop Note Marker at Hover/Playhead (N)">△ +Note <kbd>N</kbd></button>
                 <button type="button" id="btn-label-clip" class="btn small" title="Label Clip Color under Hover/Playhead (L)">🏷 Label <kbd>L</kbd></button>
                 <button type="button" id="btn-toggle-tracks" class="btn small" title="Show/Hide raw V1/V2/V3 clip lanes">▾ Tracks</button>
+                <button type="button" id="btn-tl-undo" class="btn small" title="Undo last action (Ctrl+Z)" disabled>↩ Undo</button>
+                <button type="button" id="btn-tl-redo" class="btn small" title="Redo undone action (Ctrl+Shift+Z / Ctrl+Y)" disabled>↪ Redo</button>
+                <button type="button" id="btn-tl-history" class="btn small" title="Open Action Timeline (Rewind / Fast-Forward)">⏪</button>
                 <button type="button" id="btn-ov-refresh" class="btn small" title="Refresh from Resolve">↻</button>
               </div>
             </div>
@@ -326,6 +331,42 @@
               <div id="env-blocks-list" class="stack"></div>
             </div>
           </div>
+        </section>
+
+        <!-- ACTION HISTORY / REWIND & FAST-FORWARD PANE -->
+        <section id="view-actions" class="view pad" hidden>
+          <div class="act-scrubber-card card">
+            <div class="row-between" style="margin-bottom:8px; flex-wrap:wrap; gap:8px;">
+              <div>
+                <h2 style="margin:0; font-size:16px;">⏪ Session Action Timeline</h2>
+                <span id="lbl-act-summary" class="muted" style="font-size:12px;">Persisted to disk &amp; resumable via <code>davag --resume</code> · Shortcuts: <kbd>Ctrl+Z</kbd> Undo · <kbd>Ctrl+Y</kbd> Redo</span>
+              </div>
+              <div class="row-gap">
+                <button type="button" id="btn-act-rewind-all" class="btn small" title="Rewind all session edits to step 0">⏮ Start</button>
+                <button type="button" id="btn-act-undo" class="btn small" title="Step Undo (Ctrl+Z)" disabled>⏪ Undo</button>
+                <button type="button" id="btn-act-redo" class="btn small" title="Step Redo (Ctrl+Y)" disabled>⏩ Redo</button>
+                <button type="button" id="btn-act-ff-all" class="btn small" title="Fast-forward through latest edit">⏭ Latest</button>
+                <button type="button" id="btn-act-refresh" class="btn small" title="Reload journal state">↻</button>
+              </div>
+            </div>
+
+            <div class="act-slider-row">
+              <span class="muted" style="font-size:11.5px; min-width:52px;">Step 0</span>
+              <input type="range" id="rng-act-cursor" min="0" max="0" step="1" value="0" style="flex:1;" />
+              <code id="lbl-act-cursor" class="nle-tc-readout" style="min-width:118px; text-align:center;">0 / 0</code>
+              <button type="button" id="btn-act-apply-cursor" class="btn primary small"> Scrub Here</button>
+            </div>
+
+            <div class="row-gap" id="act-filter-bar" style="margin-top:10px;">
+              <button type="button" class="pill active" data-aflt="all">All</button>
+              <button type="button" class="pill" data-aflt="operator">👤 Operator</button>
+              <button type="button" class="pill" data-aflt="agent">🤖 Agent</button>
+              <button type="button" class="pill" data-aflt="applied">✓ Applied</button>
+              <button type="button" class="pill" data-aflt="undone">↩ Undone</button>
+            </div>
+          </div>
+
+          <div id="actions-timeline-list" class="act-list stack" style="margin-top:12px;"></div>
         </section>
 
         <!-- ARTIFACTS VIEW -->

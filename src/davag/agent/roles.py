@@ -63,6 +63,7 @@ ROLE_SPECS: dict[str, RoleSpec] = {
 READ_ONLY_EXTRA_OPS = frozenset(
     {
         "fs.read",
+        "journal.history",
         "fs.list",
         "media.probe",
         "media.contact_sheet",
@@ -76,6 +77,8 @@ READ_ONLY_EXTRA_OPS = frozenset(
 
 LOGGER_MUTATE_OPS = frozenset(
     {
+        "journal.undo",
+        "journal.redo",
         "marker.add",
         "marker.delete",
         "timeline.playhead",

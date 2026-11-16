@@ -28,10 +28,15 @@ from .ffmpeg import probe_media
 MMSS_RE = re.compile(r"^(?:(?P<h>\d+):)?(?P<m>\d{1,2}):(?P<s>\d{2}(?:\.\d+)?)$")
 
 
-def _file_cache_key(path: Path, start_sec: float | None, duration_sec: float | None) -> str:
+def _file_cache_key(
+    path: Path,
+    start_sec: float | None,
+    duration_sec: float | None,
+    include_fillers: bool = False,
+) -> str:
     st = path.stat()
     h = hashlib.sha256()
-    win = f"|{start_sec or 0:.1f}|{duration_sec or -1:.1f}"
+    win = f"|{start_sec or 0:.1f}|{duration_sec or -1:.1f}|f={int(include_fillers)}"
     h.update(f"{path.resolve()}|{st.st_size}|{st.st_mtime_ns}{win}".encode())
     return h.hexdigest()[:24]
 
@@ -115,7 +120,11 @@ def _annotate_frames(
 
 
 async def _transcribe_via_gemini(
-    audio_mp3: Path, *, api_key: str, language: str | None = None
+    audio_mp3: Path,
+    *,
+    api_key: str,
+    language: str | None = None,
+    include_fillers: bool = False,
 ) -> list[dict[str, Any]]:
     from google import genai
     from google.genai import types
@@ -136,11 +145,30 @@ async def _transcribe_via_gemini(
             uploaded = await client.aio.files.get(name=fname)
 
         lang_hint = f" Language: {language}." if language else ""
+        filler_note = (
+            " STRICT VERBATIM MODE: include EVERY vocal disfluency/filler (`uh`, `um`, `umm`, `uhh`, `er`, `ah`) "
+            "as its own tight timestamped entry or inside `words` with exact `MM:SS.dd` boundaries!"
+            if include_fillers
+            else ""
+        )
+        seg_schema = types.Schema(
+            type=types.Type.ARRAY,
+            items=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "start": types.Schema(type=types.Type.STRING),
+                    "end": types.Schema(type=types.Type.STRING),
+                    "text": types.Schema(type=types.Type.STRING),
+                },
+                required=["start", "end", "text"],
+            ),
+        )
         prompt = (
             "Transcribe all spoken speech in this audio accurately into chronological segments "
-            f"(5-20 seconds per segment).{lang_hint} Use exact `MM:SS.d` timestamps (e.g. `\"00:04.2\"`, `\"05:31.8\"`) "
-            "relative to `00:00.0` — NEVER write minutes as integer part of seconds! "
-            'Return ONLY a JSON array of objects: [{"start": "00:00.0", "end": "00:08.4", "text": "..."}]. '
+            f"({'1-6 seconds per segment' if include_fillers else '5-20 seconds per segment'}).{lang_hint}{filler_note} "
+            "Use exact `MM:SS.dd` timestamps (e.g. `\"00:04.20\"`, `\"05:31.85\"`) "
+            "relative to `00:00.00` — NEVER write minutes as integer part of seconds! "
+            'Return a JSON array of objects: [{"start": "00:00.00", "end": "00:08.40", "text": "..."}]. '
             "Omit silent stretches."
         )
         resp = await client.aio.models.generate_content(
@@ -151,12 +179,18 @@ async def _transcribe_via_gemini(
             ],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                max_output_tokens=32_768,
+                response_schema=seg_schema,
+                max_output_tokens=65_536,
                 temperature=0.0,
             ),
         )
         raw_txt = (resp.text or "[]").strip()
-        parsed = json.loads(raw_txt)
+        try:
+            parsed = json.loads(raw_txt)
+        except ValueError:
+            # Salvage complete JSON objects if output ever truncates near max_output_tokens
+            objs = [json.loads(m.group(0)) for m in re.finditer(r"\{[^{}]+\}", raw_txt)]
+            parsed = objs
         if isinstance(parsed, dict) and isinstance(parsed.get("segments"), list):
             parsed = parsed["segments"]
         if not isinstance(parsed, list):
@@ -218,6 +252,7 @@ async def transcribe_media(
     language: str | None = None,
     start_sec: float | None = None,
     duration_sec: float | None = None,
+    include_fillers: bool = False,
 ) -> dict[str, Any]:
     """Transcribe a media clip (or `[start_sec, duration_sec]` slice) mapped to Resolve source frames."""
     src = Path(file_path).resolve()
@@ -228,7 +263,7 @@ async def transcribe_media(
 
     cdir = Path(cache_dir)
     cdir.mkdir(parents=True, exist_ok=True)
-    cache_file = cdir / f"{_file_cache_key(src, start_sec, duration_sec)}.json"
+    cache_file = cdir / f"{_file_cache_key(src, start_sec, duration_sec, include_fillers)}.json"
     if cache_file.is_file():
         try:
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
@@ -278,7 +313,10 @@ async def transcribe_media(
         # 2. Gemini Audio (Files API — handles multi-hour audio seamlessly!)
         if not backend_used and gemini_api_key and audio_mp3 is not None:
             raw_segments = await _transcribe_via_gemini(
-                audio_mp3, api_key=gemini_api_key, language=language
+                audio_mp3,
+                api_key=gemini_api_key,
+                language=language,
+                include_fillers=include_fillers,
             )
             backend_used = "gemini:gemini-3.8-flash"
 

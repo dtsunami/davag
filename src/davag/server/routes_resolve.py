@@ -162,17 +162,81 @@ async def api_serve_still(sid: str, st: StateDep) -> Response:
     return FileResponse(p)
 
 
+@router.get("/api/journal")
+async def api_journal_get(st: StateDep) -> dict[str, Any]:
+    return st.session.journal.list_state()
+
+
+@router.post("/api/journal/undo")
+async def api_journal_undo(req: Request, st: StateDep) -> JSONResponse:
+    session = st.session
+    body = await req.json() if req.headers.get("content-length") not in (None, "0") else {}
+    st.tl_span_memo.clear()
+    try:
+        if body.get("id"):
+            res = await session.journal.undo_entry(str(body["id"]), session.transport)
+        else:
+            res = await session.journal.undo_last(session.transport, steps=int(body.get("steps", 1)))
+        undone_info = res.get("undone") or {}
+        msg = f"Undid [{undone_info.get('actor', 'session')}] {undone_info.get('summary') or res.get('restored_timeline', 'action')}"
+        session.bus.publish("transcript", {"type": "notice", "message": msg, "origin": "web"})
+        return JSONResponse(res)
+    except Exception as err:  # noqa: BLE001
+        return JSONResponse({"error": str(err)}, status_code=400)
+
+
+@router.post("/api/journal/redo")
+async def api_journal_redo(req: Request, st: StateDep) -> JSONResponse:
+    session = st.session
+    body = await req.json() if req.headers.get("content-length") not in (None, "0") else {}
+    st.tl_span_memo.clear()
+    try:
+        if body.get("id"):
+            res = await session.journal.redo_entry(str(body["id"]), session.transport)
+        else:
+            res = await session.journal.redo_next(session.transport, steps=int(body.get("steps", 1)))
+        redone_info = res.get("redone") or {}
+        msg = f"Redid [{redone_info.get('actor', 'session')}] {redone_info.get('summary', 'action')}"
+        session.bus.publish("transcript", {"type": "notice", "message": msg, "origin": "web"})
+        return JSONResponse(res)
+    except Exception as err:  # noqa: BLE001
+        return JSONResponse({"error": str(err)}, status_code=400)
+
+
+@router.post("/api/journal/goto")
+async def api_journal_goto(req: Request, st: StateDep) -> JSONResponse:
+    session = st.session
+    body = await req.json()
+    if body.get("seq") is None:
+        return JSONResponse({"error": "'seq' is required"}, status_code=400)
+    st.tl_span_memo.clear()
+    try:
+        res = await session.journal.goto_cursor(int(body["seq"]), session.transport)
+        session.bus.publish(
+            "transcript",
+            {
+                "type": "notice",
+                "message": (
+                    f"Action timeline moved to step #{res['cursor']} "
+                    f"(undid {len(res['undone_ids'])}, redid {len(res['redone_ids'])})"
+                ),
+                "origin": "web",
+            },
+        )
+        return JSONResponse(res)
+    except Exception as err:  # noqa: BLE001
+        return JSONResponse({"error": str(err)}, status_code=400)
+
+
 @router.post("/api/resolve/undo")
 async def api_resolve_undo(st: StateDep) -> JSONResponse:
     session = st.session
-    if session.transport is None:
-        return JSONResponse({"error": "Resolve not connected"}, status_code=400)
+    st.tl_span_memo.clear()
     try:
-        res = await session.journal.undo_last_resolve(session.transport)
-        session.bus.publish(
-            "transcript",
-            {"type": "notice", "message": f"Restored timeline '{res['restored_timeline']}'", "origin": "web"},
-        )
+        res = await session.journal.undo_last(session.transport)
+        undone_info = res.get("undone") or {}
+        label = undone_info.get("summary") or f"Restored timeline '{res.get('restored_timeline', '')}'"
+        session.bus.publish("transcript", {"type": "notice", "message": f"Undid: {label}", "origin": "web"})
         return JSONResponse({"ok": True, **res})
     except Exception as err:  # noqa: BLE001
         return JSONResponse({"error": str(err)}, status_code=400)

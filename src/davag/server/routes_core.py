@@ -12,6 +12,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from davag.context.compact import compact_ledger
+from davag.context.utf8 import sanitize_utf8, sanitize_utf8_str
 from davag.session.keys_ctl import clear_provider_key, key_state, set_provider_key
 from davag.session.models_ctl import apply_model_change, provider_catalog_state
 from davag.session.profiles_ctl import choose_profile_var, profile_state, switch_profile
@@ -56,8 +57,9 @@ async def api_events(req: Request, st: StateDep) -> StreamingResponse:
     def _fmt(ev_type: str, data: Any, seq_id: int | None = None) -> bytes:
         parts = [f"id: {seq_id}\n"] if seq_id is not None else []
         parts.append(f"event: {ev_type}\n")
-        parts.append(f"data: {json.dumps(data, ensure_ascii=False)}\n\n")
-        return "".join(parts).encode("utf-8")
+        safe_json = sanitize_utf8_str(json.dumps(sanitize_utf8(data), ensure_ascii=False))
+        parts.append(f"data: {safe_json}\n\n")
+        return "".join(parts).encode("utf-8", "replace")
 
     async def _gen() -> AsyncIterator[bytes]:
         try:
@@ -301,7 +303,7 @@ async def api_artifact_get(aid: int, st: StateDep) -> JSONResponse:
     art = st.session.artifacts.get(aid)
     if art is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse({**art.to_meta_dict(), "body": art.body})
+    return JSONResponse(sanitize_utf8({**art.to_meta_dict(), "body": art.body}))
 
 
 @router.get("/api/docs")

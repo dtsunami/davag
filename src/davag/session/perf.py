@@ -23,8 +23,9 @@ class TurnPerf:
 
 
 class PerfTracker:
-    def __init__(self) -> None:
-        self.turns: list[TurnPerf] = []
+    def __init__(self, *, initial_turns: list[TurnPerf] | None = None, turn_offset: int = 0) -> None:
+        self.turns: list[TurnPerf] = list(initial_turns or [])
+        self._turn_offset = max(turn_offset, self.turns[-1].turn if self.turns else 0)
         self._active_t0: float | None = None
         self._active_model: str = ""
         self._active_effort: str = ""
@@ -72,8 +73,9 @@ class PerfTracker:
             gen_window = max(0.05, elapsed - (self._active_ttft or 0.0))
         tps = round(est_toks / gen_window, 1) if est_toks > 0 else 0.0
 
+        self._turn_offset += 1
         rec = TurnPerf(
-            turn=len(self.turns) + 1,
+            turn=self._turn_offset,
             model=self._active_model,
             effort=effort,
             ttft=round(self._active_ttft, 3) if self._active_ttft is not None else None,

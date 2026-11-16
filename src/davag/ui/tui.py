@@ -32,6 +32,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from davag import __version__
+from davag.context.utf8 import sanitize_utf8_str
 from davag.server.http import RunningWebServer
 from davag.session.bootstrap import Session
 from davag.session.dispatch import create_dispatcher
@@ -362,8 +363,16 @@ async def run_tui_loop(
         if session.transport is not None
         else f"[yellow]disconnected ({session.resolve_connect_note or 'run /resolve'})[/]"
     )
+    ro_note = (
+        f" [dim](ro: {', '.join(str(p) for p in session.cfg.ro_dirs)})[/]"
+        if session.cfg.ro_dirs
+        else ""
+    )
+    resumed_from = session.log.meta.get("resumed_from")
     banner_lines = [
         f"[bold]davag {__version__}[/] · [cyan]{session.cfg.provider}/{session.cfg.model.id}[/] (effort={session.cfg.effort})",
+        f"Workspace: [bold]{session.cfg.cwd}[/]{ro_note}"
+        + (f" · [dim]resumed {resumed_from}[/]" if resumed_from else ""),
         f"DaVinci Resolve: {res_badge}",
     ]
     if web_server is not None:
@@ -512,13 +521,13 @@ async def run_tui_loop(
 
     while not should_exit:
         try:
-            line = await prompt_session.prompt_async(_prompt_message)
+            line = sanitize_utf8_str(await prompt_session.prompt_async(_prompt_message))
         except KeyboardInterrupt:
             if session.agent.busy:
                 session.agent.cancel()
                 continue
             break
-        except EOFError:
+        except (EOFError, asyncio.CancelledError):
             break
 
         trimmed = line.strip()

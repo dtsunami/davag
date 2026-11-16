@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,10 @@ from google import genai
 from google.genai import types
 
 from .base import ProviderError, StreamEvent, wrap_provider_error
+
+# Per-chunk idle timeout (seconds) — resets on EVERY streamed chunk so an actively streaming
+# turn can run indefinitely without being cut off, while genuine silent socket stalls still retry!
+DEFAULT_STREAM_IDLE_TIMEOUT_SEC = 300.0
 
 # Session-level cache so an uploaded >18MB clip isn't re-uploaded on every subsequent turn!
 _UPLOADED_FILES_CACHE: dict[str, tuple[str, str]] = {}  # abs_path -> (file_uri, mime_type)
@@ -41,8 +46,18 @@ class GeminiAdapter:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.thinking_visible = thinking_visible
-        http_opts = types.HttpOptions(base_url=base_url, timeout=210_000) if base_url else types.HttpOptions(timeout=210_000)
-        self._client = genai.Client(api_key=api_key, http_options=http_opts)
+        self.stream_idle_timeout = float(
+            os.environ.get("DAVAG_STREAM_IDLE_TIMEOUT") or DEFAULT_STREAM_IDLE_TIMEOUT_SEC
+        )
+        # Never set HttpOptions(timeout=...): google-genai converts that into BOTH an
+        # `X-Server-Timeout` RPC deadline header AND `aiohttp.ClientTimeout(total=...)`,
+        # which kills long turns at a fixed wall-clock mark even while actively streaming tokens!
+        http_opts = types.HttpOptions(base_url=base_url) if base_url else None
+        self._client = (
+            genai.Client(api_key=api_key, http_options=http_opts)
+            if http_opts is not None
+            else genai.Client(api_key=api_key)
+        )
 
     async def _ensure_uploaded(self, file_path: str, media_type: str) -> types.Part:
         key = str(Path(file_path).resolve())
@@ -128,7 +143,7 @@ class GeminiAdapter:
                 ),
             )
 
-            # 210s TTFT / per-chunk stall guard feeding cleanly into loop.py's automatic retry
+            idle_timeout = self.stream_idle_timeout
             try:
                 stream = await asyncio.wait_for(
                     self._client.aio.models.generate_content_stream(
@@ -136,11 +151,11 @@ class GeminiAdapter:
                         contents=contents,
                         config=cfg,
                     ),
-                    timeout=210.0,
+                    timeout=idle_timeout,
                 )
             except TimeoutError as t_err:
                 raise ProviderError(
-                    "[gemini] Timed out waiting >210s for stream open",
+                    f"[gemini] Timed out waiting >{idle_timeout:.0f}s for stream open",
                     provider="gemini",
                     status=408,
                     retryable=True,
@@ -154,12 +169,13 @@ class GeminiAdapter:
                 if cancel_event is not None and cancel_event.is_set():
                     break
                 try:
-                    chunk = await asyncio.wait_for(aiter.__anext__(), timeout=210.0)
+                    # Resets on every received chunk: active token/thought streaming never times out!
+                    chunk = await asyncio.wait_for(aiter.__anext__(), timeout=idle_timeout)
                 except StopAsyncIteration:
                     break
                 except TimeoutError as t_err:
                     raise ProviderError(
-                        "[gemini] Stream stalled >210s waiting for next chunk",
+                        f"[gemini] Stream idle >{idle_timeout:.0f}s with no new chunks",
                         provider="gemini",
                         status=408,
                         retryable=not emitted_any,

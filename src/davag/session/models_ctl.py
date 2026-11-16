@@ -66,11 +66,15 @@ def apply_model_change(
         home=cur.home,
         davai_home=cur.davai_home,
     )
-    # Preserve any in-memory session keys set via `/keys` without `--save`
+    # Preserve any in-memory session keys set via `/keys` without `--save` and resumed ro_dirs
     for p_name, k_val in cur.keys.items():
         if k_val and not new_cfg.keys.get(p_name):
             new_cfg.keys[p_name] = k_val
             new_cfg.key_origins[p_name] = cur.key_origins.get(p_name, {"name": "session", "from": "session"})
+    for ro_p in cur.ro_dirs:
+        if ro_p != new_cfg.cwd and ro_p not in new_cfg.ro_dirs:
+            new_cfg.ro_dirs.append(ro_p)
+    session.sandbox.ro_dirs = list(new_cfg.ro_dirs)
 
     session.cfg = new_cfg
     session.agent.cfg = new_cfg

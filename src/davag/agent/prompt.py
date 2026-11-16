@@ -59,7 +59,7 @@ def _build_protocol_default(role: str = "master") -> str:
         ("media.contact_sheet", "read", "`clip_id` or `path`, `start_sec`?, `duration_sec`?, `cols`?, `rows`?, `attach_to_context`?", "Tiled PNG storyboard with **burned-in SMPTE timecode & frame (`fNNNN`)** on every tile (~1,200 tokens)"),
         ("media.scene_cuts", "read", "`clip_id` or `path`, `threshold`?, `start_sec`?, `duration_sec`?", "Detect visual shot-change boundaries mapped to exact source frames & timecodes"),
         ("media.detect_silence", "read", "`clip_id` or `path`, `noise_db`?, `min_silence_sec`?, `pad_sec`?, `fps`?", "Detect non-silent speech `[start_frame, end_frame]` segments ready for `timeline.append_clips`"),
-        ("media.transcribe", "read", "`clip_id` or `path`, `start_sec`?, `duration_sec`?, `language`?", "Cached word- & segment-level transcript mapped to Resolve source frames"),
+        ("media.transcribe", "read", "`clip_id` or `path`, `start_sec`?, `duration_sec`?, `language`?, `include_fillers`?", "Cached transcript mapped to Resolve source frames (`include_fillers: true` preserves verbatim `uh`/`um` disfluency timestamps)"),
         ("media.master_vo", "mutate", "`clip_id` or `path`, `output_path`?, `target_lufs`? (-14), `denoise`?", "Clean & master voiceover audio (80Hz HPF + denoise + compressor + `-14 LUFS` 48kHz WAV)"),
         ("media.proxy_clip", "read", "`clip_id` or `path`, `start_sec`?, `duration_sec`?, `height`?, `fps`?, `prefer_av1`?, `attach_to_context`?", "Intel Arc QSV / NVENC 480p review MP4 attached for Gemini native video inspection"),
         ("media.generate_resolve_proxy", "mutate", "`clip_id` or `path`, `height`?, `video_kbps`?, `link_in_resolve`?", "Generate smooth-scrubbing short-GOP QSV proxy & auto-link onto Resolve `MediaPoolItem`"),
@@ -71,11 +71,14 @@ def _build_protocol_default(role: str = "master") -> str:
         ("youtube.upload", "eval", "`manifest_path`", "Upload staged `youtube_manifest.json` bundle (MP4 + thumbnail + `.srt` captions + auto first-comment when `unlisted`/`public`) to YouTube Data API v3"),
         ("youtube.update", "eval", "`manifest_path`, `video_id`?, `privacy_status`?, `post_first_comment`? (true)", "Update metadata, description links, privacy status, thumbnail, & top comment on an already-uploaded YouTube video in <1s without re-uploading MP4"),
         ("otio.build", "mutate", "`timeline_name`, `fps`, `video_segments`, `audio_segments`?, `output_path`", "Write `.otio` or `.fcpxml` timeline ready for `timeline.import_timeline_file`"),
+        ("journal.history", "read", "`limit`?, `actor`?", "Inspect unified operator + agent Action History (`id`, `seq`, `actor`, `applied`, `summary`)"),
+        ("journal.undo", "mutate", "`id`?, `steps`?", "Undo most recent edit(s) or a specific action `id` (e.g. `\"act-0003\"`), restoring markers/clips/files"),
+        ("journal.redo", "mutate", "`id`?, `steps`?", "Redo next undone edit(s) or a specific action `id`"),
         ("fs.read", "read", "`path`, `lines`?", "Read workspace file"),
         ("fs.list", "read", "`path`, `max`?", "List workspace directory"),
         ("fs.write", "mutate", "`path`, `text`, `overwrite`?", "Write workspace file (sandboxed & journaled)"),
         ("fs.replace", "mutate", "`path`, `old`, `new`, `all`?", "Replace text in workspace file (sandboxed & journaled)"),
-        ("shell", "eval", "`cmd`", "Local shell command (segregated, requires operator approval)"),
+        ("shell", "eval", "`cmd`, `cwd`?", "Local shell command (segregated, requires operator approval)"),
     ]
     extra_rows = "\n".join(
         f"| `{op}` | `{tier}` | {prms} | {desc} |"

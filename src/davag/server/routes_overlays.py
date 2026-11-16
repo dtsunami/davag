@@ -328,7 +328,10 @@ async def api_overlays_thumb(
 
 @router.post("/api/overlays/adjust")
 async def api_overlays_adjust(body: AdjustTimelineBody, st: StateDep) -> JSONResponse:
-    """Interactive GUI drag/edit handler for markers (`Cyan` chapters / `Purple` QR links) & overlay clips."""
+    """Interactive GUI drag/edit handler for markers (`Cyan` chapters / `Purple` QR links) & overlay clips.
+    Records every operator action into `session.journal` so markers, drags, labels & clip deletes
+    support instant Undo/Redo, Rewind/Fast-Forward, and `--resume` persistence!
+    """
     from davag.resolve_ops.helpers import frames_to_tc, tc_to_frames
 
     session = st.session
@@ -342,32 +345,178 @@ async def api_overlays_adjust(body: AdjustTimelineBody, st: StateDep) -> JSONRes
         )
         fps = float(tl_st.get("fps") or 30.0)
         tl_start = int(tl_st.get("start_frame", 0))
+        v_tracks = tl_st.get("tracks", {}).get("video", [])
+
+        def _find_tl_item(iid: str) -> tuple[int, dict[str, Any]] | tuple[None, None]:
+            for tr in v_tracks:
+                tidx = int(tr.get("track_index", 1))
+                for it in tr.get("items") or []:
+                    if str(it.get("item_id")) == iid:
+                        return tidx, it
+            return None, None
 
         if body.action in ("move_marker", "add_marker"):
+            mk_res = await session.transport.call("marker.list", timeout=2.0)
+            all_markers = list(mk_res.get("markers") or [])
+
+            old_m: dict[str, Any] | None = None
+            rel_old: int | None = None
             if body.action == "move_marker" and body.old_frame is not None:
                 rel_old = max(0, int(body.old_frame) - tl_start)
+                old_m = next((m for m in all_markers if int(m.get("frame_offset", -1)) == rel_old), None)
                 with contextlib.suppress(Exception):
-                    await session.transport.call("marker.delete", {"frame": rel_old})
+                    await session.transport.call("marker.delete", {"frame_offset": rel_old})
+
             target_tc = body.new_tc or frames_to_tc(int(body.new_frame or tl_start), fps)
+            new_abs = tc_to_frames(target_tc, fps)
+            rel_new = max(0, new_abs - tl_start)
+            overwritten_m = next(
+                (m for m in all_markers if int(m.get("frame_offset", -1)) == rel_new and rel_new != rel_old),
+                None,
+            )
+            if overwritten_m is not None:
+                with contextlib.suppress(Exception):
+                    await session.transport.call("marker.delete", {"frame_offset": rel_new})
+
+            m_color = body.color or (old_m.get("color") if old_m else None) or "Cyan"
+            m_name = body.name or (old_m.get("name") if old_m else None) or "Marker"
+            m_note = body.note if body.note is not None else (str(old_m.get("note", "")) if old_m else "")
+            m_dur = max(1, int(body.duration or (old_m.get("duration", 1) if old_m else 1)))
+            m_cd = body.custom_data or (
+                str(old_m.get("custom_data", "")) if old_m else ("davag:link" if m_color.lower() == "purple" else "")
+            )
+
             res = await session.transport.call(
                 "marker.add",
                 {
-                    "tc": target_tc,
-                    "color": body.color or "Cyan",
-                    "name": body.name or "Marker",
-                    "note": body.note or "",
-                    "duration": max(1, int(body.duration or 1)),
-                    "custom_data": body.custom_data or ("davag:link" if body.color.lower() == "purple" else ""),
+                    "frame_offset": rel_new,
+                    "color": m_color,
+                    "name": m_name,
+                    "note": m_note,
+                    "duration": m_dur,
+                    "custom_data": m_cd,
                 },
             )
-            return JSONResponse({"ok": True, "marker": res})
+            actual_off = int(res.get("frame_offset", rel_new))
+            actual_tc = str(res.get("tc", target_tc))
+
+            undo_ops: list[dict[str, Any]] = [
+                {"op": "marker.delete", "params": {"frame_offset": actual_off}, "ignore_error": True}
+            ]
+            if overwritten_m is not None:
+                undo_ops.append(
+                    {
+                        "op": "marker.add",
+                        "params": {
+                            "frame_offset": int(overwritten_m["frame_offset"]),
+                            "color": overwritten_m.get("color", "Cyan"),
+                            "name": overwritten_m.get("name", "Marker"),
+                            "note": overwritten_m.get("note", ""),
+                            "duration": int(overwritten_m.get("duration", 1)),
+                            "custom_data": overwritten_m.get("custom_data", ""),
+                        },
+                    }
+                )
+            if old_m is not None and rel_old is not None:
+                undo_ops.extend(
+                    [
+                        {"op": "marker.delete", "params": {"frame_offset": rel_old}, "ignore_error": True},
+                        {
+                            "op": "marker.add",
+                            "params": {
+                                "frame_offset": rel_old,
+                                "color": old_m.get("color", "Cyan"),
+                                "name": old_m.get("name", "Marker"),
+                                "note": old_m.get("note", ""),
+                                "duration": int(old_m.get("duration", 1)),
+                                "custom_data": old_m.get("custom_data", ""),
+                            },
+                        },
+                    ]
+                )
+
+            redo_ops: list[dict[str, Any]] = []
+            if rel_old is not None:
+                redo_ops.append({"op": "marker.delete", "params": {"frame_offset": rel_old}, "ignore_error": True})
+            redo_ops.extend(
+                [
+                    {"op": "marker.delete", "params": {"frame_offset": actual_off}, "ignore_error": True},
+                    {
+                        "op": "marker.add",
+                        "params": {
+                            "frame_offset": actual_off,
+                            "color": m_color,
+                            "name": m_name,
+                            "note": m_note,
+                            "duration": m_dur,
+                            "custom_data": m_cd,
+                        },
+                    },
+                ]
+            )
+
+            if body.action == "add_marker" or old_m is None:
+                summary = f'Added {m_color} marker "{m_name}" @ {actual_tc}'
+                act_kind = "add_marker"
+            elif old_m.get("tc") != actual_tc:
+                summary = f'Moved {m_color} marker "{m_name}" {old_m.get("tc")} -> {actual_tc}'
+                act_kind = "move_marker"
+            else:
+                summary = f'Edited {m_color} marker "{m_name}" @ {actual_tc}'
+                act_kind = "edit_marker"
+
+            rec = session.journal.record_inverse_action(
+                actor="operator",
+                action_type=act_kind,
+                summary=summary,
+                undo_ops=undo_ops,
+                redo_ops=redo_ops,
+                tc=actual_tc,
+                color=m_color,
+                details={"before": old_m, "after": res},
+            )
+            return JSONResponse({"ok": True, "marker": res, "action_id": rec.id})
 
         if body.action == "delete_marker" and body.old_frame is not None:
+            mk_res = await session.transport.call("marker.list", timeout=2.0)
+            all_markers = list(mk_res.get("markers") or [])
             rel_old = max(0, int(body.old_frame) - tl_start)
-            res = await session.transport.call("marker.delete", {"frame": rel_old})
-            return JSONResponse({"ok": True, **res})
+            old_m = next((m for m in all_markers if int(m.get("frame_offset", -1)) == rel_old), None)
+            res = await session.transport.call("marker.delete", {"frame_offset": rel_old})
+
+            rec_id: str | None = None
+            if old_m is not None:
+                m_color = str(old_m.get("color") or "Cyan")
+                m_name = str(old_m.get("name") or "Marker")
+                m_tc = str(old_m.get("tc") or frames_to_tc(tl_start + rel_old, fps))
+                rec = session.journal.record_inverse_action(
+                    actor="operator",
+                    action_type="delete_marker",
+                    summary=f'Deleted {m_color} marker "{m_name}" @ {m_tc}',
+                    undo_ops=[
+                        {"op": "marker.delete", "params": {"frame_offset": rel_old}, "ignore_error": True},
+                        {
+                            "op": "marker.add",
+                            "params": {
+                                "frame_offset": rel_old,
+                                "color": m_color,
+                                "name": m_name,
+                                "note": str(old_m.get("note") or ""),
+                                "duration": int(old_m.get("duration") or 1),
+                                "custom_data": str(old_m.get("custom_data") or ""),
+                            },
+                        },
+                    ],
+                    redo_ops=[{"op": "marker.delete", "params": {"frame_offset": rel_old}, "ignore_error": True}],
+                    tc=m_tc,
+                    color=m_color,
+                    details={"deleted_marker": old_m},
+                )
+                rec_id = rec.id
+            return JSONResponse({"ok": True, **res, "action_id": rec_id})
 
         if body.action == "move_overlay" and body.item_id:
+            old_tidx, old_it = _find_tl_item(body.item_id)
             params: dict[str, Any] = {"item_id": body.item_id, "update_linked": False}
             if body.new_frame is not None:
                 params["record_frame"] = int(body.new_frame)
@@ -378,20 +527,76 @@ async def api_overlays_adjust(body: AdjustTimelineBody, st: StateDep) -> JSONRes
             if body.extend_end_frames is not None:
                 params["extend_end_frames"] = int(body.extend_end_frames)
             res = await session.transport.call("timeline.trim_and_move", params)
-            return JSONResponse({"ok": True, **res})
+
+            rec_id = None
+            if old_it is not None:
+                old_rf = int(old_it["record_start"])
+                old_tc_s = str(old_it.get("record_start_tc") or frames_to_tc(old_rf, fps))
+                new_rf = int(params.get("record_frame", old_rf))
+                new_tc_s = frames_to_tc(new_rf, fps)
+                inv_params: dict[str, Any] = {
+                    "item_id": body.item_id,
+                    "update_linked": False,
+                    "record_frame": old_rf,
+                }
+                if old_tidx is not None and body.track_index is not None:
+                    inv_params["track_index"] = old_tidx
+                if body.extend_end_frames:
+                    inv_params["extend_end_frames"] = -int(body.extend_end_frames)
+                rec = session.journal.record_inverse_action(
+                    actor="operator",
+                    action_type="move_overlay",
+                    summary=f'Moved overlay "{old_it.get("name", body.item_id)}" {old_tc_s} -> {new_tc_s}',
+                    undo_ops=[{"op": "timeline.trim_and_move", "params": inv_params}],
+                    redo_ops=[{"op": "timeline.trim_and_move", "params": params}],
+                    tc=new_tc_s,
+                    color="Mint",
+                    details={"item_id": body.item_id, "old_frame": old_rf, "new_frame": new_rf},
+                )
+                rec_id = rec.id
+            return JSONResponse({"ok": True, **res, "action_id": rec_id})
 
         if body.action == "set_clip_color" and body.item_id:
+            _old_tidx, old_it = _find_tl_item(body.item_id)
+            old_color = str(old_it.get("clip_color", "")) if old_it else ""
+            it_name = str(old_it.get("name", body.item_id)) if old_it else body.item_id
+            it_tc = str(old_it.get("record_start_tc", "")) if old_it else ""
             res = await session.transport.call(
                 "timeline.set_clip_state",
                 {"item_ids": [body.item_id], "clip_color": body.color},
             )
-            return JSONResponse({"ok": True, **res})
+            rec = session.journal.record_inverse_action(
+                actor="operator",
+                action_type="set_clip_color",
+                summary=f'Labeled clip "{it_name}" {old_color or "None"} -> {body.color or "None"}',
+                undo_ops=[{"op": "timeline.set_clip_state", "params": {"item_ids": [body.item_id], "clip_color": old_color}}],
+                redo_ops=[{"op": "timeline.set_clip_state", "params": {"item_ids": [body.item_id], "clip_color": body.color}}],
+                tc=it_tc,
+                color=body.color,
+            )
+            return JSONResponse({"ok": True, **res, "action_id": rec.id})
 
         if body.action == "delete_overlay" and body.item_id:
+            _old_tidx, old_it = _find_tl_item(body.item_id)
+            it_name = str(old_it.get("name", body.item_id)) if old_it else body.item_id
+            it_tc = str(old_it.get("record_start_tc", "")) if old_it else ""
+            cp = await session.journal.create_resolve_checkpoint(session.transport)
             res = await session.transport.call(
                 "timeline.delete_clips", {"item_ids": [body.item_id], "ripple": False}
             )
-            return JSONResponse({"ok": True, **res})
+            rec_id = None
+            if cp is not None:
+                rec = session.journal.record_batch_action(
+                    actor="operator",
+                    action_type="delete_overlay",
+                    summary=f'Deleted overlay "{it_name}" @ {it_tc or "timeline"}',
+                    checkpoint=cp,
+                    tc=it_tc,
+                    color="Mint",
+                    details={"item_id": body.item_id, "name": it_name},
+                )
+                rec_id = rec.id
+            return JSONResponse({"ok": True, **res, "action_id": rec_id})
 
         return JSONResponse({"error": f"Unsupported adjust action '{body.action}'"}, status_code=400)
     except Exception as err:  # noqa: BLE001
@@ -459,6 +664,7 @@ async def api_overlays_render(body: RenderOverlayBody, st: StateDep) -> JSONResp
         cache_dir=session.cfg.home / "cache",
         cfg=session.cfg,
         yolo=True,
+        actor="operator",
     )
     if outcome.status != "ok":
         err_msg = "; ".join(e["message"] for e in outcome.errors) or "overlay render failed"

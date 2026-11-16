@@ -58,12 +58,15 @@ def start_tui(
     resume: str | bool = False,
     accept_stale_prompts: bool = False,
 ) -> int:
-    return asyncio.run(
-        _start_async(
-            initial_input=initial_input,
-            cwd=cwd,
-            overrides=overrides,
-            resume=resume,
-            accept_stale_prompts=accept_stale_prompts,
+    try:
+        return asyncio.run(
+            _start_async(
+                initial_input=initial_input,
+                cwd=cwd,
+                overrides=overrides,
+                resume=resume,
+                accept_stale_prompts=accept_stale_prompts,
+            )
         )
-    )
+    except KeyboardInterrupt:
+        return 130

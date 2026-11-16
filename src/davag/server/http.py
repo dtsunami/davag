@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import socket
 import sys
 from collections.abc import Callable
@@ -24,6 +25,7 @@ import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
+from davag.context.utf8 import sanitize_utf8, sanitize_utf8_str
 from davag.session.bootstrap import Session
 
 from .auth import assert_safe_bind, make_web_token, read_request_token, token_matches
@@ -115,8 +117,27 @@ class RunningWebServer:
             self.sock.close()
 
 
+class SafeJSONResponse(JSONResponse):
+    """JSONResponse that heals Win32 UTF-16 surrogates instead of crashing pydantic_core/utf-8."""
+
+    def render(self, content: Any) -> bytes:
+        text = json.dumps(
+            sanitize_utf8(content),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        return sanitize_utf8_str(text).encode("utf-8", "replace")
+
+
 def create_fastapi_app(state: WebState) -> FastAPI:
-    app = FastAPI(title="davag Web Studio", docs_url=None, redoc_url=None, openapi_url="/api/openapi.json")
+    app = FastAPI(
+        title="davag Web Studio",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url="/api/openapi.json",
+        default_response_class=SafeJSONResponse,
+    )
     app.state.davag = state
 
     @app.middleware("http")
@@ -152,9 +173,9 @@ def create_fastapi_app(state: WebState) -> FastAPI:
             return JSONResponse({"error": "not found"}, status_code=404)
         return FileResponse(target)
 
-    app.include_router(core_router)
-    app.include_router(resolve_router)
-    app.include_router(overlays_router)
+    app.include_router(core_router, default_response_class=SafeJSONResponse)
+    app.include_router(resolve_router, default_response_class=SafeJSONResponse)
+    app.include_router(overlays_router, default_response_class=SafeJSONResponse)
     return app
 
 
@@ -209,7 +230,7 @@ async def start_web_server(
     sock.setblocking(False)
     actual_port = int(sock.getsockname()[1])
 
-    uv_cfg = uvicorn.Config(app, host=host, port=actual_port, log_level="warning", access_log=False)
+    uv_cfg = uvicorn.Config(app, host=host, port=actual_port, log_level="critical", access_log=False)
     server = uvicorn.Server(uv_cfg)
     # Prevent uvicorn from installing OS signal handlers when embedded inside prompt_toolkit REPL!
     server.install_signal_handlers = lambda: None  # type: ignore[method-assign]

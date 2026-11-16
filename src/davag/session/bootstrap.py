@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,7 +26,7 @@ from .history import PromptHistory
 from .log import SessionLog
 from .perf import PerfTracker
 from .promptedit import apply_staged_prompts
-from .resume import find_session_dir, restore_ledger_from_session
+from .resume import find_session_dir, resolve_lineage, restore_ledger_from_lines
 
 
 @dataclass
@@ -92,14 +93,26 @@ async def bootstrap_session(
     resumed_id: str | None = None
     resume_dir: Path | None = None
 
+    lineage: dict[str, Any] | None = None
     if resume:
         resume_dir, meta = find_session_dir(home, resume)
         resumed_id = str(meta.get("id"))
-        if cwd is None and meta.get("cwd") and Path(meta["cwd"]).is_dir():
-            cwd = meta["cwd"]
+        lineage = resolve_lineage(home, resume_dir, meta)
 
     defaults = settings_to_defaults(load_settings(home))
     cfg = load_config(cwd=cwd, defaults=defaults, overrides=overrides, home=home)
+
+    # Keep the operator's current working directory active; append the resumed session's
+    # original cwd (and any prior cwds in the resume chain) as read-only directories.
+    resumed_cwd_paths: list[Path] = []
+    for cand_raw in (lineage["resumed_cwds"] if lineage else []):
+        with contextlib.suppress(OSError):
+            cand_p = Path(cand_raw).resolve()
+            if cand_p.is_dir():
+                if cand_p not in resumed_cwd_paths:
+                    resumed_cwd_paths.append(cand_p)
+                if cand_p != cfg.cwd and cand_p not in cfg.ro_dirs:
+                    cfg.ro_dirs.append(cand_p)
 
     prompts, prompt_sources, prompt_layers = resolve_prompts_layered(home=cfg.home, cwd=cfg.cwd)
     forks = check_forks(sources=prompt_sources, layers=prompt_layers)
@@ -143,15 +156,22 @@ async def bootstrap_session(
         provider=cfg.provider,
         model_id=cfg.model.id,
         resumed_from=resumed_id,
+        ro_dirs=cfg.ro_dirs,
+        resumed_cwds=resumed_cwd_paths,
+        initial_totals=lineage["totals"] if lineage else None,
+        initial_transcript_lines=lineage["transcript_lines"] if lineage else None,
     )
-    if resume_dir is not None:
-        restore_ledger_from_session(resume_dir, ledger)
+    if lineage is not None:
+        restore_ledger_from_lines(lineage["transcript_lines"], ledger)
 
-    journal = Journal(log.dir)
+    journal = Journal(log.dir, resume_from=resume_dir)
     artifacts = ArtifactStore()
     pastes = PasteStore()
     history = PromptHistory(cfg.home)
-    perf = PerfTracker()
+    perf = PerfTracker(
+        initial_turns=lineage["perf_turns"] if lineage else None,
+        turn_offset=int(lineage["totals"]["turns"]) if lineage else 0,
+    )
 
     sess_holder: list[Session] = []
 
@@ -172,8 +192,14 @@ async def bootstrap_session(
         session_log=log,
         perf_tracker=perf,
         drain_prompts_hook=_drain_prompts,
+        initial_stats=lineage["totals"] if lineage else None,
     )
     bus = SessionBus(agent=agent)
+    bus.state["stats"] = dict(agent.stats)
+    if lineage is not None:
+        for entry in lineage["web_replay"]:
+            bus.publish("transcript", entry)
+    journal.on_change = lambda st_payload: bus.publish("journal-updated", st_payload)
 
     session = Session(
         cfg=cfg,

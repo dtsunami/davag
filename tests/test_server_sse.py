@@ -177,20 +177,25 @@ async def test_web_sidecar_auth_sse_replay_grab_and_approval(
             from davag.server.http import is_benign_socket_disconnect
             loop.set_exception_handler(lambda _l, ctx: None if is_benign_socket_disconnect(ctx.get("exception")) else unhandled_excs.append(ctx))
             try:
-                for _ in range(12):
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.connect(("127.0.0.1", srv.port))
-                    s.sendall(f"GET /api/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {srv.token}\r\n\r\n".encode())
-                    # Force hard TCP RST (`SO_LINGER` l_onoff=1, l_linger=0) -> triggers WinError 10054 on server!
-                    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh", 1, 0))
-                    s.close()
-                # Also reset an already-accepted connection mid-response to exercise `_call_connection_lost`!
-                s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s2.connect(("127.0.0.1", srv.port))
-                s2.sendall(f"GET /api/events?token={srv.token} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".encode())
-                _ = s2.recv(64)
-                s2.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh", 1, 0))
-                s2.close()
+                def _rst_storm() -> None:
+                    for _ in range(12):
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(2.0)
+                        s.connect(("127.0.0.1", srv.port))
+                        s.sendall(f"GET /api/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {srv.token}\r\n\r\n".encode())
+                        # Force hard TCP RST (`SO_LINGER` l_onoff=1, l_linger=0) -> triggers WinError 10054 on server!
+                        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh", 1, 0))
+                        s.close()
+                    # Also reset an already-accepted connection mid-response to exercise `_call_connection_lost`!
+                    s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s2.settimeout(2.0)
+                    s2.connect(("127.0.0.1", srv.port))
+                    s2.sendall(f"GET /api/events?token={srv.token} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".encode())
+                    _ = s2.recv(64)
+                    s2.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh", 1, 0))
+                    s2.close()
+
+                await asyncio.to_thread(_rst_storm)
                 await asyncio.sleep(0.15)
                 assert unhandled_excs == [], f"Expected zero unhandled loop exceptions on TCP RST, got: {unhandled_excs}"
 
@@ -199,6 +204,76 @@ async def test_web_sidecar_auth_sse_replay_grab_and_approval(
                     assert r_after.status == 200
             finally:
                 loop.set_exception_handler(prev_handler)
+    finally:
+        await srv.close()
+        await session.close()
+
+async def test_web_sidecar_utf16_surrogate_resilience(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify Win32 UTF-16 surrogate pairs and lone surrogates in `history.jsonl`,
+    `Ledger`, and `SessionBus` never crash FastAPI/Pydantic or SSE."""
+    home = tmp_path / "home_surr"
+    cwd = tmp_path / "cwd_surr"
+    home.mkdir()
+    cwd.mkdir()
+    monkeypatch.setenv("DAVAG_HOME", str(home))
+    monkeypatch.setenv("DAVAI_HOME", str(tmp_path / "davai_empty"))
+
+    # Pre-seed history.jsonl with escaped UTF-16 surrogate pair + lone surrogate (as json.loads produces!)
+    (home / "history.jsonl").write_text(
+        '{"t": 1.0, "text": "pasted thought \\ud83d\\udcad and broken \\ud83d end"}\n',
+        encoding="utf-8",
+    )
+
+    session = await bootstrap_session(
+        cwd=cwd,
+        make_provider_fn=lambda _cfg, **_kw: _WebTestProvider(),
+        auto_connect_resolve=False,
+    )
+    surr_pair = chr(0xD83D) + chr(0xDCAD)
+    lone_surr = chr(0xD83D)
+
+    # Also inject raw un-sanitized surrogates directly into Ledger & Bus to test SafeJSONResponse & SSE _fmt!
+    session.ledger.add(
+        seg_type="user",
+        label=f"raw {surr_pair} label {lone_surr}",
+        role="user",
+        text=f"raw body {surr_pair} and lone {lone_surr}",
+    )
+    session.bus.publish("transcript", {"type": "user", "text": f"sse {surr_pair} and {lone_surr}"})
+
+    submit_fn = create_dispatcher(session=session)
+    srv = await start_web_server(
+        session=session,
+        submit_fn=submit_fn,
+        host="127.0.0.1",
+        port=0,
+        token="surr-token",
+    )
+    headers = {"Authorization": "Bearer surr-token"}
+    try:
+        async with aiohttp.ClientSession() as client:
+            async with client.get(f"{srv.url}/api/history", headers=headers) as r_hist:
+                assert r_hist.status == 200
+                h_data = await r_hist.json()
+                assert "💭" in h_data["prompts"][0]
+                assert "\ufffd" in h_data["prompts"][0]
+
+            async with client.get(f"{srv.url}/api/context", headers=headers) as r_ctx:
+                assert r_ctx.status == 200
+                c_data = await r_ctx.json()
+                assert any("💭" in s["label"] for s in c_data["segments"])
+
+            async with client.get(f"{srv.url}/api/session", headers=headers) as r_sess:
+                assert r_sess.status == 200
+
+            # Verify SSE stream yields both hello and the surrogate-healed transcript event cleanly
+            async with client.get(f"{srv.url}/api/events?token=surr-token") as sse:
+                assert sse.status == 200
+                chunk = (await asyncio.wait_for(sse.content.readany(), timeout=2.0)).decode("utf-8")
+                assert "event: hello" in chunk
+                assert "sse 💭" in chunk
     finally:
         await srv.close()
         await session.close()

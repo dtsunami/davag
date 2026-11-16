@@ -11,6 +11,7 @@ Modeled directly on `davai/src/agent/loop.js`:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 import json
 import re
 import time
@@ -53,6 +54,10 @@ REPEAT_CHECK_EVERY = 1024
 
 INTENT_RE = re.compile(
     r"\b(?:i'?ll|i will|i'?m going to|i am going to|let me|let'?s|first,? i|next,? i|now i'?ll)\b",
+    re.IGNORECASE,
+)
+CONDITIONAL_OFFER_RE = re.compile(
+    r"(?:^|[,;:\-–—]\s*)\b(?:if|once|when|whenever|should|drop|send|share|pass)\b",
     re.IGNORECASE,
 )
 
@@ -163,6 +168,7 @@ class Agent(EventEmitter):
         session_log: Any = None,
         perf_tracker: Any = None,
         drain_prompts_hook: Callable[[], dict[str, Any] | None] | None = None,
+        initial_stats: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.cfg = cfg
@@ -183,15 +189,19 @@ class Agent(EventEmitter):
         self.steers: list[str] = []
         self._last_resolve_banner: str | None = None
 
+        seed = initial_stats or {}
+        # Spend incurred in THIS process run — resets to 0.0 on `--resume` so DAVAG_MAX_COST
+        # enforces a per-run budget cap while `stats["cost"]` accumulates across the whole session!
+        self.run_cost: float = 0.0
         self.stats: dict[str, Any] = {
-            "turns": 0,
-            "ops": 0,
-            "cost": 0.0,
-            "in_tokens": 0,
-            "out_tokens": 0,
-            "cache_read": 0,
-            "malformed": 0,
-            "nudges": 0,
+            "turns": int(seed.get("turns", 0) or 0),
+            "ops": int(seed.get("ops", 0) or 0),
+            "cost": float(seed.get("cost", 0.0) or 0.0),
+            "in_tokens": int(seed.get("in_tokens", 0) or 0),
+            "out_tokens": int(seed.get("out_tokens", 0) or 0),
+            "cache_read": int(seed.get("cache_read", 0) or 0),
+            "malformed": int(seed.get("malformed", 0) or 0),
+            "nudges": int(seed.get("nudges", 0) or 0),
         }
 
     def cancel(self) -> None:
@@ -327,6 +337,7 @@ class Agent(EventEmitter):
         turn_cost = 0.0
         if usage_ev is not None:
             turn_cost = cost_of_usage(self.cfg.model, usage_ev)
+            self.run_cost += turn_cost
             self.stats["cost"] += turn_cost
             self.stats["in_tokens"] += usage_ev.in_fresh
             self.stats["out_tokens"] += usage_ev.out
@@ -347,12 +358,14 @@ class Agent(EventEmitter):
 
         self.stats["turns"] += 1
         if self.perf is not None:
-            self.perf.on_turn_end(
+            perf_rec = self.perf.on_turn_end(
                 elapsed=elapsed,
                 out_tokens=usage_ev.out if usage_ev else 0,
                 context_in=usage_ev.context_in if usage_ev else self.ledger.total_tokens,
                 effort=effort_override or self.cfg.effort,
             )
+            if self.session_log is not None:
+                self.session_log.record("perf", asdict(perf_rec))
 
         self.emit(
             "turn-end",
@@ -413,8 +426,11 @@ class Agent(EventEmitter):
                     self.emit("cancelled", {"turn": self.stats["turns"]})
                     return {"status": "cancelled"}
 
-                if self.cfg.max_cost > 0 and self.stats["cost"] >= self.cfg.max_cost:
-                    msg = f"Session spend (${self.stats['cost']:.4f}) reached DAVAG_MAX_COST (${self.cfg.max_cost:.2f})"
+                if self.cfg.max_cost > 0 and self.run_cost >= self.cfg.max_cost:
+                    msg = (
+                        f"Session run spend (${self.run_cost:.4f}; accumulated ${self.stats['cost']:.4f}) "
+                        f"reached DAVAG_MAX_COST (${self.cfg.max_cost:.2f})"
+                    )
                     self.emit("error", {"message": msg})
                     return {"status": "over_budget", "message": msg}
 
@@ -517,7 +533,11 @@ class Agent(EventEmitter):
                     if self._drain_steers():
                         continue
                     last_sentence = text.strip().splitlines()[-1] if text.strip() else ""
-                    if INTENT_RE.search(last_sentence) and nudges < MAX_NUDGES:
+                    if (
+                        INTENT_RE.search(last_sentence)
+                        and not CONDITIONAL_OFFER_RE.search(last_sentence)
+                        and nudges < MAX_NUDGES
+                    ):
                         nudges += 1
                         self.stats["nudges"] += 1
                         self.emit("nudge", {"attempt": nudges})

@@ -18,6 +18,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +46,7 @@ from .journal import FileEntry, Journal, ResolveCheckpoint
 from .sandbox import Sandbox, SandboxError
 
 FS_OPS = ("fs.read", "fs.write", "fs.replace", "fs.list")
+JOURNAL_OPS = ("journal.history", "journal.undo", "journal.redo")
 MEDIA_OPS = (
     "media.probe",
     "media.contact_sheet",
@@ -155,11 +157,17 @@ def plan_batch(
             if call.op == "shell":
                 if not str(call.params.get("cmd", "")).strip():
                     errors.append({"index": call.index, "op": call.op, "message": "shell requires 'cmd'"})
+                elif call.params.get("cwd"):
+                    sh_dir = sandbox.resolve_for_read(str(call.params["cwd"]))
+                    if not sh_dir.is_dir():
+                        errors.append({"index": call.index, "op": call.op, "message": f"{sandbox.rel(sh_dir)} is not a directory"})
             elif call.op in ("youtube.upload", "youtube.update"):
                 if not call.params.get("manifest_path"):
                     errors.append({"index": call.index, "op": call.op, "message": "youtube.upload requires 'manifest_path'"})
                 else:
                     sandbox.resolve_for_read(str(call.params["manifest_path"]))
+            elif call.op in JOURNAL_OPS:
+                pass
             elif call.op in FS_OPS:
                 err = _plan_fs_op(call, sandbox)
                 if err:
@@ -230,6 +238,8 @@ def plan_batch(
                             "message": "DaVinci Resolve is not connected (start Resolve or run `/resolve`)",
                         }
                     )
+                elif call.op == "timeline.vo_script" and call.params.get("output_dir"):
+                    sandbox.resolve_for_write(str(call.params["output_dir"]))
         except SandboxError as s_err:
             errors.append({"index": call.index, "op": call.op, "message": str(s_err)})
     return errors
@@ -736,6 +746,7 @@ async def _exec_media_op(
             language=p.get("language"),
             start_sec=float(p["start_sec"]) if p.get("start_sec") is not None else None,
             duration_sec=float(p["duration_sec"]) if p.get("duration_sec") is not None else None,
+            include_fillers=bool(p.get("include_fillers", False)),
         )
 
     if call.op == "media.master_vo":
@@ -770,12 +781,21 @@ def _needs_resolve_checkpoint(ops: list[OpCall]) -> bool:
 
 async def _run_shell_cmd(cmd: str, cwd: Path, timeout: float) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
+    env = dict(os.environ)
+    py_dir = str(Path(sys.executable).resolve().parent)
+    cur_parts = [p for p in env.get("PATH", "").split(os.pathsep) if p and p.lower() != py_dir.lower()]
+    if py_dir:
+        env["PATH"] = os.pathsep.join([py_dir, *cur_parts])
+        venv_root = Path(py_dir).parent
+        if (venv_root / "pyvenv.cfg").is_file():
+            env["VIRTUAL_ENV"] = str(venv_root)
 
     def _run() -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             cmd,
             shell=True,
             cwd=str(cwd),
+            env=env,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -788,6 +808,49 @@ async def _run_shell_cmd(cmd: str, cwd: Path, timeout: float) -> dict[str, Any]:
         "stdout": proc.stdout[-16_000:],
         "stderr": proc.stderr[-8_000:],
     }
+
+
+
+async def _exec_journal_op(
+    call: OpCall, journal: Journal, transport: ResolveTransport | None
+) -> dict[str, Any]:
+    p = call.params
+    if call.op == "journal.history":
+        st = journal.list_state()
+        actor_flt = str(p.get("actor", "")).strip().lower()
+        acts = st["actions"]
+        if actor_flt in ("operator", "agent"):
+            acts = [a for a in acts if a.get("actor") == actor_flt]
+        limit_n = int(p.get("limit", 40))
+        return {
+            "cursor": st["cursor"],
+            "max_seq": st["max_seq"],
+            "can_undo": st["can_undo"],
+            "can_redo": st["can_redo"],
+            "actions": acts[-limit_n:],
+        }
+    if call.op == "journal.undo":
+        if p.get("target_seq") is not None:
+            return await journal.goto_cursor(int(p["target_seq"]), transport)
+        if p.get("id"):
+            return await journal.undo_entry(str(p["id"]), transport)
+        return await journal.undo_last(transport, steps=int(p.get("steps", 1)))
+    if call.op == "journal.redo":
+        if p.get("target_seq") is not None:
+            return await journal.goto_cursor(int(p["target_seq"]), transport)
+        if p.get("id"):
+            return await journal.redo_entry(str(p["id"]), transport)
+        return await journal.redo_next(transport, steps=int(p.get("steps", 1)))
+    raise ValueError(f"Unhandled journal op: {call.op}")
+
+
+def _marker_target_scope(params: dict[str, Any]) -> dict[str, Any]:
+    scope: dict[str, Any] = {}
+    if params.get("item_id"):
+        scope["item_id"] = params["item_id"]
+    elif params.get("clip_id"):
+        scope["clip_id"] = params["clip_id"]
+    return scope
 
 
 async def execute_batch(
@@ -803,6 +866,7 @@ async def execute_batch(
     shell_timeout: float = 120.0,
     approve: ApproveHook | None = None,
     auto_checkpoint: bool = True,
+    actor: str = "agent",
 ) -> BatchOutcome:
     clip_map, allowed_media = (
         await _fetch_resolve_clip_map(transport)
@@ -823,6 +887,12 @@ async def execute_batch(
 
     results: list[dict[str, Any]] = []
     file_entries: list[FileEntry] = []
+    after_file_entries: list[FileEntry] = []
+    inverse_undo_ops: list[dict[str, Any]] = []
+    inverse_redo_ops: list[dict[str, Any]] = []
+    mutated_ops_names: list[str] = []
+    first_tc: str = ""
+    first_color: str = ""
     attached_media: list[dict[str, Any]] = []
     gated_queue: list[OpCall] = []
     checkpoint: ResolveCheckpoint | None = None
@@ -839,10 +909,14 @@ async def execute_batch(
             continue
 
         try:
-            if call.op in FS_OPS:
+            if call.op in JOURNAL_OPS:
+                res = await _exec_journal_op(call, journal, transport)
+            elif call.op in FS_OPS:
                 f_entry, res = _exec_fs_op(call, sandbox, journal)
                 if f_entry is not None:
                     file_entries.append(f_entry)
+                    after_file_entries.append(journal.snapshot_file(Path(f_entry.target), log_event=False))
+                    mutated_ops_names.append(f"{call.op}({res.get('path', '')})")
             elif call.op in MEDIA_OPS:
                 res = await _exec_media_op(
                     call,
@@ -859,6 +933,8 @@ async def execute_batch(
                 elif call.op in ("media.contact_sheet", "youtube.thumbnail") and res.get("attach_to_context"):
                     attached_media.append({"kind": "image", "path": res["path"]})
                 elif call.op in ("motion.render_overlay", "motion.qr_callout"):
+                    mutated_ops_names.append(call.op)
+                    first_tc = first_tc or str(res.get("record_tc") or call.params.get("record_tc") or "")
                     attached_media.append(
                         {"kind": "image" if res.get("format") == "png_rgba" else "preview_only", "path": res["path"]}
                     )
@@ -868,7 +944,69 @@ async def execute_batch(
                     )
             else:
                 assert transport is not None
-                res = await transport.call(call.op, call.params)
+                pre_markers: list[dict[str, Any]] = []
+                scope = _marker_target_scope(call.params)
+                if checkpoint is None and call.op in ("marker.add", "marker.delete"):
+                    with contextlib.suppress(Exception):
+                        mk_l = await transport.call("marker.list", scope)
+                        pre_markers = list(mk_l.get("markers") or [])
+
+                call_params = dict(call.params)
+                if call.op == "timeline.vo_script":
+                    call_params["output_dir"] = (
+                        str(sandbox.resolve_for_write(str(call_params["output_dir"])))
+                        if call_params.get("output_dir")
+                        else str(sandbox.cwd / "vo_scripts")
+                    )
+                op_timeout = 60.0
+                if call.op == "render.start" and bool(call_params.get("wait", False)):
+                    op_timeout = max(60.0, float(call_params.get("timeout_sec", 120.0)) + 15.0)
+                res = await transport.call(call.op, call_params, timeout=op_timeout)
+                spec_c = get_op(call.op)
+                if spec_c and spec_c.tier != "read":
+                    mutated_ops_names.append(call.op)
+
+                if checkpoint is None and call.op == "marker.add":
+                    off = int(res["frame_offset"])
+                    m_color = str(call.params.get("color", "Blue"))
+                    m_name = str(call.params.get("name", "Note"))
+                    m_note = str(call.params.get("note", ""))
+                    m_dur = int(call.params.get("duration", 1))
+                    m_cd = str(call.params.get("custom_data", "davag"))
+                    first_tc = first_tc or str(res.get("tc", ""))
+                    first_color = first_color or m_color
+                    inverse_undo_ops.insert(0, {"op": "marker.delete", "params": {**scope, "frame_offset": off}, "ignore_error": True})
+                    inverse_redo_ops.append({"op": "marker.add", "params": {**scope, "frame_offset": off, "color": m_color, "name": m_name, "note": m_note, "duration": m_dur, "custom_data": m_cd}})
+                    inverse_redo_ops.insert(len(inverse_redo_ops) - 1, {"op": "marker.delete", "params": {**scope, "frame_offset": off}, "ignore_error": True})
+                elif checkpoint is None and call.op == "marker.delete":
+                    if call.params.get("color"):
+                        c_low = str(call.params["color"]).strip().lower()
+                        removed = pre_markers if c_low == "all" else [m for m in pre_markers if str(m.get("color", "")).lower() == c_low]
+                    else:
+                        off = int(res.get("frame_offset", -1))
+                        removed = [m for m in pre_markers if int(m.get("frame_offset", -2)) == off]
+                    for m in removed:
+                        first_tc = first_tc or str(m.get("tc", ""))
+                        first_color = first_color or str(m.get("color", ""))
+                        m_off = int(m["frame_offset"])
+                        inverse_undo_ops.insert(
+                            0,
+                            {
+                                "op": "marker.add",
+                                "params": {
+                                    **scope,
+                                    "frame_offset": m_off,
+                                    "color": m.get("color", "Blue"),
+                                    "name": m.get("name", ""),
+                                    "note": m.get("note", ""),
+                                    "duration": int(m.get("duration", 1)),
+                                    "custom_data": m.get("custom_data", ""),
+                                },
+                            },
+                        )
+                        inverse_undo_ops.insert(0, {"op": "marker.delete", "params": {**scope, "frame_offset": m_off}, "ignore_error": True})
+                    inverse_redo_ops.append({"op": "marker.delete", "params": dict(call.params), "ignore_error": True})
+
                 if call.op == "timeline.grab_still" and res.get("attach_to_context"):
                     attached_media.append({"kind": "image", "path": res["path"]})
 
@@ -919,7 +1057,12 @@ async def execute_batch(
 
         try:
             if call.op == "shell":
-                res = await _run_shell_cmd(str(call.params["cmd"]), sandbox.cwd, shell_timeout)
+                sh_cwd = (
+                    sandbox.resolve_for_read(str(call.params["cwd"]))
+                    if call.params.get("cwd")
+                    else sandbox.cwd
+                )
+                res = await _run_shell_cmd(str(call.params["cmd"]), sh_cwd, shell_timeout)
                 ok = res["exit_code"] == 0
                 results.append({"index": call.index, "op": call.op, "ok": ok, "result": res})
                 if not ok:
@@ -960,6 +1103,7 @@ async def execute_batch(
             else:
                 assert transport is not None
                 res = await transport.call(call.op, call.params)
+                mutated_ops_names.append(call.op)
                 results.append({"index": call.index, "op": call.op, "ok": True, "result": res})
         except Exception as err:  # noqa: BLE001
             results.append({"index": call.index, "op": call.op, "ok": False, "error": str(err)})
@@ -972,6 +1116,26 @@ async def execute_batch(
             )
 
     results.sort(key=lambda r: int(r["index"]))
+    if checkpoint is not None or file_entries or inverse_undo_ops:
+        op_list_str = ", ".join(mutated_ops_names[:3]) + (
+            f" (+{len(mutated_ops_names) - 3})" if len(mutated_ops_names) > 3 else ""
+        )
+        prefix = "Rendered overlay" if actor == "operator" else "Agent batch"
+        summary_str = f"{prefix}: {op_list_str or 'edit'}"
+        act_type = mutated_ops_names[0].split("(")[0] if len(mutated_ops_names) == 1 else "batch"
+        journal.record_batch_action(
+            actor=actor,
+            action_type=act_type,
+            summary=summary_str,
+            checkpoint=checkpoint,
+            before_files=file_entries,
+            after_files=after_file_entries,
+            undo_ops=inverse_undo_ops if checkpoint is None else None,
+            redo_ops=inverse_redo_ops if checkpoint is None else None,
+            tc=first_tc,
+            color=first_color,
+            details={"ops": mutated_ops_names},
+        )
     return BatchOutcome(
         status="ok",
         results=results,

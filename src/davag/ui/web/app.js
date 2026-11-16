@@ -288,6 +288,11 @@
       updateHeader({ provider: d.provider, model: d.model.id, effort: d.effort });
     });
 
+    es.addEventListener('journal-updated', (e) => {
+      trackSeq(e);
+      applyJournalState(JSON.parse(e.data));
+    });
+
     es.addEventListener('yolo-changed', (e) => {
       trackSeq(e);
       const d = JSON.parse(e.data);
@@ -578,6 +583,7 @@
     updateHeader(s);
     connectSSE();
     refreshPerf();
+    refreshJournalState();
   }
 
   // Event bindings
@@ -599,6 +605,7 @@
       document.querySelectorAll('.view').forEach((v) => { v.hidden = v.id !== `view-${target}`; });
       if (target === 'timeline') loadTimelineStudio();
       else stopFollowPoll();
+      if (target === 'actions') refreshJournalState();
       if (target === 'resolve') loadResolveInspector();
       if (target === 'context') loadContextTab();
       if (target === 'perf') refreshPerf();
@@ -672,7 +679,192 @@
 
   $('btn-grab-frame').onclick = () => api('/api/resolve/grab', { method: 'POST', body: { attach: true } });
   $('viewer-close').onclick = () => { $('viewer-drawer').hidden = true; };
-  $('btn-undo-tl').onclick = () => api('/api/resolve/undo', { method: 'POST' });
+  let journalState = { actions: [], total: 0, applied_count: 0, undone_count: 0, cursor: 0, max_seq: 0, can_undo: false, can_redo: false };
+  let actFilter = 'all';
+
+  function applyJournalState(st) {
+    if (!st) return;
+    journalState = st;
+    const canU = Boolean(st.can_undo);
+    const canR = Boolean(st.can_redo);
+    const uTip = canU ? `Undo: ${st.next_undo} (Ctrl+Z)` : 'Nothing to undo';
+    const rTip = canR ? `Redo: ${st.next_redo} (Ctrl+Y)` : 'Nothing to redo';
+
+    ['btn-undo-tl', 'btn-tl-undo', 'btn-act-undo'].forEach((id) => {
+      const el = $(id);
+      if (el) { el.disabled = !canU; el.title = uTip; }
+    });
+    ['btn-redo-tl', 'btn-tl-redo', 'btn-act-redo'].forEach((id) => {
+      const el = $(id);
+      if (el) { el.disabled = !canR; el.title = rTip; }
+    });
+
+    const badge = $('hdr-act-count');
+    if (badge) {
+      badge.hidden = !st.total;
+      badge.textContent = `${st.applied_count}/${st.total}`;
+    }
+
+    $('rng-act-cursor').max = String(st.max_seq || 0);
+    $('rng-act-cursor').value = String(st.cursor || 0);
+    $('lbl-act-cursor').textContent = `Step ${st.cursor || 0} / ${st.max_seq || 0}`;
+    $('btn-act-rewind-all').disabled = !canU;
+    $('btn-act-ff-all').disabled = !canR;
+
+    const opCount = (st.actions || []).filter((a) => a.actor === 'operator').length;
+    const agCount = (st.actions || []).filter((a) => a.actor === 'agent').length;
+    $('lbl-act-summary').innerHTML =
+      `${st.total} recorded (${opCount} 👤 operator · ${agCount} 🤖 agent · ${st.applied_count} applied · ${st.undone_count} undone) · persisted &amp; resumable`;
+
+    if (!$('view-actions').hidden) renderActionsTimeline();
+  }
+
+  async function refreshJournalState() {
+    try {
+      const st = await api('/api/journal');
+      applyJournalState(st);
+    } catch { /* ignore */ }
+  }
+
+  async function runUndoRedo(kind, payload = {}) {
+    try {
+      if (!$('view-timeline').hidden) $('ov-nle-status').textContent = kind === 'undo' ? '↩ Undoing…' : '↪ Redoing…';
+      await api(`/api/journal/${kind}`, { method: 'POST', body: payload });
+      await refreshJournalState();
+      refreshResolveStrip();
+      if (!$('view-timeline').hidden) {
+        await loadTimelineStudio();
+        $('ov-nle-status').textContent = kind === 'undo' ? '✓ Undone' : '✓ Redone';
+      }
+    } catch (err) {
+      if (!$('view-timeline').hidden) $('ov-nle-status').textContent = `✗ ${err.message}`;
+      appendEntry('warning', err.message);
+    }
+  }
+
+  async function runGotoCursor(targetSeq) {
+    try {
+      await api('/api/journal/goto', { method: 'POST', body: { seq: Number(targetSeq) } });
+      await refreshJournalState();
+      refreshResolveStrip();
+      if (!$('view-timeline').hidden) await loadTimelineStudio();
+    } catch (err) {
+      appendEntry('warning', err.message);
+    }
+  }
+
+  function renderActionsTimeline() {
+    const box = $('actions-timeline-list');
+    const items = [...(journalState.actions || [])].reverse().filter((a) => {
+      if (actFilter === 'operator') return a.actor === 'operator';
+      if (actFilter === 'agent') return a.actor === 'agent';
+      if (actFilter === 'applied') return a.applied && !a.superseded;
+      if (actFilter === 'undone') return !a.applied && !a.superseded;
+      return true;
+    });
+
+    if (!items.length) {
+      box.innerHTML = '<div class="card muted">No actions match this filter yet. Drag/edit markers on 🎬 timeline or run an agent edit!</div>';
+      return;
+    }
+
+    const stratLabel = { inverse_ops: '⚡ instant inverse', timeline_swap: '📸 .davag-snap', files_only: '📄 file snap' };
+    box.innerHTML = items.map((a) => {
+      const isOp = a.actor === 'operator';
+      const timeStr = new Date((a.ts || 0) * 1000).toLocaleTimeString();
+      const cls = `act-card actor-${isOp ? 'operator' : 'agent'}${!a.applied ? ' is-undone' : ''}${a.superseded ? ' is-superseded' : ''}`;
+      const badgeLbl = isOp ? '👤 Operator' : '🤖 Agent';
+      const stateTag = a.superseded ? 'SUPERSEDED' : (a.applied ? '✓ APPLIED' : '↩ UNDONE');
+      const tcBtn = a.tc ? `<button type="button" class="act-tc-jump" data-jtc="${escHtml(a.tc)}" title="Jump to ${escHtml(a.tc)} in 🎬 timeline">@ ${escHtml(a.tc)}</button>` : '';
+      const dot = a.color ? `<span class="color-dot" style="display:inline-block;background:${COLOR_HEX[String(a.color).toLowerCase()] || CLIP_HEX[String(a.color).toLowerCase()] || '#4cc9f0'};"></span>` : '';
+
+      let btns = '';
+      if (!a.superseded) {
+        if (a.applied) {
+          btns += `<button type="button" class="btn small js-act-toggle" data-aid="${escHtml(a.id)}" data-dir="undo" title="${a.individual_capable ? 'Undo just this action' : 'Rewind timeline through this checkpoint'}">↩ Undo${a.individual_capable ? ' this' : ''}</button>`;
+          btns += `<button type="button" class="btn small js-act-goto" data-seq="${a.seq - 1}" title="Rewind session to right before step #${a.seq}">⏮ Before #${a.seq}</button>`;
+        } else {
+          btns += `<button type="button" class="btn primary small js-act-toggle" data-aid="${escHtml(a.id)}" data-dir="redo" title="${a.individual_capable ? 'Redo just this action' : 'Fast-forward timeline to this checkpoint'}">↪ Redo${a.individual_capable ? ' this' : ''}</button>`;
+          btns += `<button type="button" class="btn small js-act-goto" data-seq="${a.seq}" title="Fast-forward session through step #${a.seq}">⏭ Thru #${a.seq}</button>`;
+        }
+      }
+
+      return `<div class="${cls}">
+        <div style="display:flex; flex-direction:column; gap:5px; min-width:240px; flex:1;">
+          <div class="row-gap" style="flex-wrap:wrap;">
+            <code>#${a.seq}</code>
+            <span class="act-badge ${isOp ? 'operator' : 'agent'}">${badgeLbl}</span>
+            ${dot}
+            <strong>${escHtml(a.summary)}</strong>
+            ${tcBtn}
+          </div>
+          <div class="row-gap muted" style="font-size:11px;">
+            <span>${escHtml(a.id)} · ${timeStr}</span>
+            <span class="act-strat-tag">${stratLabel[a.strategy] || escHtml(a.strategy)}</span>
+            <span>${stateTag}</span>
+          </div>
+        </div>
+        <div class="row-gap">${btns}</div>
+      </div>`;
+    }).join('');
+
+    box.querySelectorAll('.js-act-toggle').forEach((b) => {
+      b.onclick = () => runUndoRedo(b.dataset.dir, { id: b.dataset.aid });
+    });
+    box.querySelectorAll('.js-act-goto').forEach((b) => {
+      b.onclick = () => runGotoCursor(Number(b.dataset.seq));
+    });
+    box.querySelectorAll('.act-tc-jump').forEach((b) => {
+      b.onclick = async () => {
+        const tc = b.dataset.jtc;
+        const tlTab = document.querySelector('.tab[data-tab="timeline"]');
+        if (tlTab) tlTab.click();
+        await api('/api/prompter/seek', { method: 'POST', body: { tc } });
+        await loadTimelineStudio();
+      };
+    });
+  }
+
+  $('btn-undo-tl').onclick = () => runUndoRedo('undo');
+  $('btn-redo-tl').onclick = () => runUndoRedo('redo');
+  $('btn-tl-undo').onclick = () => runUndoRedo('undo');
+  $('btn-tl-redo').onclick = () => runUndoRedo('redo');
+  $('btn-tl-history').onclick = () => {
+    const actTab = document.querySelector('.tab[data-tab="actions"]');
+    if (actTab) actTab.click();
+  };
+  $('btn-act-undo').onclick = () => runUndoRedo('undo');
+  $('btn-act-redo').onclick = () => runUndoRedo('redo');
+  $('btn-act-rewind-all').onclick = () => runGotoCursor(0);
+  $('btn-act-ff-all').onclick = () => runGotoCursor(journalState.max_seq || 0);
+  $('btn-act-refresh').onclick = () => refreshJournalState();
+  $('rng-act-cursor').oninput = () => {
+    $('lbl-act-cursor').textContent = `Step ${$('rng-act-cursor').value} / ${journalState.max_seq || 0}`;
+  };
+  $('btn-act-apply-cursor').onclick = () => runGotoCursor(Number($('rng-act-cursor').value));
+
+  $('act-filter-bar').querySelectorAll('[data-aflt]').forEach((btn) => {
+    btn.onclick = () => {
+      actFilter = btn.dataset.aflt;
+      $('act-filter-bar').querySelectorAll('[data-aflt]').forEach((p) => p.classList.toggle('active', p === btn));
+      renderActionsTimeline();
+    };
+  });
+
+  // Global Ctrl+Z (Undo) & Ctrl+Shift+Z / Ctrl+Y (Redo) when focus isn't inside a text field!
+  document.addEventListener('keydown', (ev) => {
+    if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
+    const tag = (ev.target && ev.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (ev.target && ev.target.isContentEditable)) return;
+    const k = ev.key.toLowerCase();
+    if (k === 'z' && !ev.shiftKey) {
+      ev.preventDefault();
+      if (journalState.can_undo) runUndoRedo('undo');
+    } else if ((k === 'z' && ev.shiftKey) || k === 'y') {
+      ev.preventDefault();
+      if (journalState.can_redo) runUndoRedo('redo');
+    }
+  });
   $('btn-res-refresh').onclick = loadResolveInspector;
   $('btn-res-direct').onclick = async () => { await api('/api/resolve/reconnect', { method: 'POST', body: { mode: 'direct' } }); loadResolveInspector(); };
   $('btn-res-bridge').onclick = async () => { await api('/api/resolve/reconnect', { method: 'POST', body: { mode: 'bridge' } }); loadResolveInspector(); };

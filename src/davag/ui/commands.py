@@ -39,7 +39,9 @@ HELP_TEXT = """Commands
   /youtube-stage <title>      stage YouTube release bundle (chapters, `.srt`, `DESCRIPTION.md`, render queue)
   /youtube-auth [json_path]   run one-time Google OAuth browser flow & save `~/.davag/youtube_token.json`
   /watch <clip|path> [s dur]  transcode QSV/NVENC review video & attach for Gemini review
-  /undo                       restore active Resolve timeline from most recent `.davag-snap` checkpoint
+  /undo [id|steps]            undo last operator/agent action (or a specific `act-XXXX` entry)
+  /redo [id|steps]            redo next undone action (or a specific `act-XXXX` entry)
+  /actions [n]                list operator & agent Action History with rewind/redo status
   /image <path>               attach a workspace image to context
   /video <path>               attach a workspace video to context (Gemini inline <=18MB / Files API >18MB)
   /youtube <url> [minutes]    attach a YouTube video by reference (Gemini only)
@@ -625,19 +627,47 @@ async def handle_command(
         return {"handled": True}
 
     if cmd == "/undo":
-        if session.transport is None:
-            push({"type": "warning", "message": "DaVinci Resolve is not connected."})
-            return {"handled": True}
         try:
-            undone = await session.journal.undo_last_resolve(session.transport)
-            push(
-                {
-                    "type": "notice",
-                    "message": f"Restored timeline '{undone['restored_timeline']}' from checkpoint #{undone['checkpoint_seq']}.",
-                }
-            )
+            arg = args[0].strip() if args else ""
+            if arg.lower().startswith("act-"):
+                res = await session.journal.undo_entry(arg, session.transport)
+            else:
+                steps_n = int(arg) if arg.isdigit() else 1
+                res = await session.journal.undo_last(session.transport, steps=steps_n)
+            u = res.get("undone") or {}
+            msg = f"Undid [{u.get('actor', 'session')}] {u.get('id', '')}: {u.get('summary') or res.get('restored_timeline', 'action')}"
+            push({"type": "notice", "message": msg})
         except Exception as err:  # noqa: BLE001
             push({"type": "warning", "message": str(err)})
+        return {"handled": True}
+
+    if cmd == "/redo":
+        try:
+            arg = args[0].strip() if args else ""
+            if arg.lower().startswith("act-"):
+                res = await session.journal.redo_entry(arg, session.transport)
+            else:
+                steps_n = int(arg) if arg.isdigit() else 1
+                res = await session.journal.redo_next(session.transport, steps=steps_n)
+            r_it = res.get("redone") or {}
+            push({"type": "notice", "message": f"Redid [{r_it.get('actor', 'session')}] {r_it.get('id', '')}: {r_it.get('summary', 'action')}"})
+        except Exception as err:  # noqa: BLE001
+            push({"type": "warning", "message": str(err)})
+        return {"handled": True}
+
+    if cmd == "/actions":
+        st_j = session.journal.list_state()
+        acts = st_j["actions"]
+        if not acts:
+            push({"type": "info", "text": "No recorded operator or agent actions in this session yet."})
+            return {"handled": True}
+        lim = int(args[0]) if args and args[0].isdigit() else 30
+        lines = [f"Action Timeline (cursor={st_j['cursor']}/{st_j['max_seq']}, applied={st_j['applied_count']}, undone={st_j['undone_count']}):"]
+        for a in acts[-lim:]:
+            state_lbl = "SUP" if a.get("superseded") else ("ON " if a.get("applied") else "OFF")
+            who = "OPR" if a.get("actor") == "operator" else "AGT"
+            lines.append(f"  [{state_lbl}] {a['id']} ({who}) {a['summary']}")
+        push({"type": "info", "text": "\n".join(lines)})
         return {"handled": True}
 
     if cmd == "/image":

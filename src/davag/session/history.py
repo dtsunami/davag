@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from davag.context.utf8 import sanitize_utf8_str
+
 MAX_HISTORY = 500
 
 
@@ -22,13 +24,16 @@ class PromptHistory:
         try:
             for line in self.path.read_text(encoding="utf-8", errors="replace").splitlines():
                 if line.strip():
-                    items.append(json.loads(line))
+                    obj = json.loads(line)
+                    if isinstance(obj, dict) and "text" in obj:
+                        obj["text"] = sanitize_utf8_str(str(obj["text"]))
+                    items.append(obj)
         except (OSError, ValueError):
             return items[-MAX_HISTORY:]
         return items[-MAX_HISTORY:]
 
     def add(self, text: str) -> None:
-        cleaned = text.strip()
+        cleaned = sanitize_utf8_str(text).strip()
         if not cleaned or cleaned.startswith(("/", "sh ")) or cleaned == "sh":
             return
         if self.entries and self.entries[-1].get("text") == cleaned:

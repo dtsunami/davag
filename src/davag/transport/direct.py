@@ -123,7 +123,10 @@ class DirectTransport(ResolveTransport):
     ) -> dict[str, Any]:
         loop = asyncio.get_running_loop()
         fut = loop.run_in_executor(self._executor, self._call_sync, op_name, params)
-        return await asyncio.wait_for(fut, timeout=timeout)
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except TimeoutError as err:
+            raise TimeoutError(f'Resolve op "{op_name}" timed out after {timeout:.0f}s') from err
 
     async def close(self) -> None:
         self._ctx = None

@@ -73,6 +73,10 @@ def switch_profile(session: Session, name: str | None) -> dict[str, Any]:
         write_env_text(path, before_raw)
         raise
 
+    for ro_p in session.cfg.ro_dirs:
+        if ro_p != new_cfg.cwd and ro_p not in new_cfg.ro_dirs:
+            new_cfg.ro_dirs.append(ro_p)
+    session.sandbox.ro_dirs = list(new_cfg.ro_dirs)
     session.cfg = new_cfg
     session.agent.cfg = new_cfg
     session.ledger.limit = new_cfg.context_limit
@@ -102,6 +106,10 @@ def choose_profile_var(
         write_env_text(path, before_raw)
         raise
 
+    for ro_p in session.cfg.ro_dirs:
+        if ro_p != new_cfg.cwd and ro_p not in new_cfg.ro_dirs:
+            new_cfg.ro_dirs.append(ro_p)
+    session.sandbox.ro_dirs = list(new_cfg.ro_dirs)
     session.cfg = new_cfg
     session.agent.cfg = new_cfg
     st = profile_state(session)
