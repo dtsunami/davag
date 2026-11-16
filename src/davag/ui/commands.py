@@ -472,7 +472,7 @@ async def handle_command(
                 f"  • On-Screen Subtitle Track: {'IMPORTED onto ST1 (VO Teleprompter)!' if res['imported_onto_timeline'] else res['resolve_srt']}\n"
                 f"  • Fairlight ADR Cue List:   {res['fairlight_adr_csv']}\n"
                 f"    (In Resolve: Fairlight -> ADR panel -> Setup -> Import Cue List -> select CSV for countdown streamer!)\n"
-                f"  • Live Web Teleprompter:    open Web GUI -> click `🎙 prompter` tab!\n\n"
+                f"  • Live Web Teleprompter:    open Web GUI -> click `🎬 timeline` tab!\n\n"
                 f"{cues_preview}"
             )
             push({"type": "info", "text": msg})

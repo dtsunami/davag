@@ -34,7 +34,9 @@ davag --resume                           # Resume most recent session
 | `/watch <clip\|path> [start dur]` | Attach short video proxy slice for native Gemini video review |
 | `/vo [prefix]` | Convert timeline markers into Fairlight ADR `.csv` + `ST1` `.srt` Teleprompter |
 | `/thumbnail <prompt>` | Generate 16:9 YouTube thumbnail via OpenRouter Flux + viewer frame |
-| `/youtube-stage <title>` | Stage YouTube bundle (`DESCRIPTION.md` w/ chapters, `.srt`, render job) |
+| `/youtube-stage <title>` | Stage YouTube bundle (`DESCRIPTION.md` w/ chapters & links, QR overlays, `.srt`, render job) |
+| `/youtube-auth [json_path]` | Run one-time Google OAuth2 browser login & save `~/.davag/youtube_token.json` |
+| `/web [open\|copy\|token]` | Inspect, open, or copy tokenized Web Studio URL / bearer token |
 | `/undo` | Restore active Resolve timeline from `.davag-snap-*` checkpoint |
 | `/model [id] [--save]` | Switch active LLM (`gemini-4-carbon`, `claude-opus-5-5`, `gpt-5.1`, etc.) |
 | `/effort <low\|medium\|high\|xhigh\|max>` | Adjust reasoning effort |

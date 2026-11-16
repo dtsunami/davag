@@ -36,7 +36,7 @@ davag = "davag.cli:run"
 where = ["src"]
 
 [tool.setuptools.package-data]
-davag = ["ui/web/*", "prompts/*.md", "docs/*.md"]
+davag = ["ui/web/*", "docs/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

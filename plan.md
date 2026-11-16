@@ -1,5 +1,7 @@
 # `davag` — DaVinci Resolve AI Editing Agent & Harness Plan
 
+> **Historical Architecture Spec:** This document records the initial Phase 1–5 design plan. For current production invariants, exact `dr_ops` / slash-command catalogs, FastAPI + Unified `🎬 timeline` Studio architecture, QuickTime PNG overlays, and Resolve 21.2 parity, see **`DAVAG.md`**, **`README.md`**, and **`src/davag/docs/`**.
+
 ## 1. Vision & Scope
 
 `davag` ("DaVinci Agent") is a Python 3.11+ agentic CLI REPL + Web GUI sidecar modeled directly on `davai`'s architecture (`D:\davag\davai`), purpose-built for **DaVinci Resolve** (Studio & Free).

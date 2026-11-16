@@ -12,7 +12,7 @@ Every object in your DaVinci Resolve timeline compiles into a specific YouTube a
 |---|---|
 | **Active Timeline Name** | Dedicated folder `youtube_staging/<slug>/` + `youtube_manifest.json` (`video_id` & `comment_id` persisted across updates) |
 | **`Cyan` (or numbered) Markers** | **YouTube Chapters (`00:00 ...`)** in `DESCRIPTION.md` (enforces `00:00` first chapter & `>=10s` spacing automatically) |
-| **`Purple` Link Markers** *(`name` = Topic Title, `note` = `https://...`)* | **1) In-Video Animated QR + Short-URL Overlay** rendered to 10-bit ProRes 4444 Alpha `.mov` on `Overlays` (`Video 3`) at that exact timecode<br>**2) Line-1 Above-the-Fold Link** + **Timestamped `Topics & Links:`** list in `DESCRIPTION.md`<br>**3) `COMMENT.md` (`first_comment`)** auto-posted via `commentThreads.insert` when `unlisted` or `public` |
+| **`Purple` Link Markers** *(`name` = Topic Title, `note` = `https://...`)* | **1) In-Video Animated QR + Short-URL Overlay** rendered to transparent QuickTime PNG Alpha `.mov` on `Overlays` (`Video 2+`) at that exact timecode<br>**2) Line-1 Above-the-Fold Link** + **Timestamped `Topics & Links:`** list in `DESCRIPTION.md`<br>**3) `COMMENT.md` (`first_comment`)** auto-posted via `commentThreads.insert` when `unlisted` or `public` |
 | **Subtitle Track (`English CC`)** | `<slug>_captions.srt` (`00:00:00,000`-aligned) → uploaded automatically via YouTube Captions API |
 | **Thumbnail (`*tn*.png` or `/thumbnail`)** | **1) Custom 16:9 YouTube Thumbnail**<br>**2) `8.0s` Card-Ready Dimmed End-Screen Slate** (`<slug>_end_screen.mp4`) appended to `Video 1` |
 | **Deliver Preset (`YouTube - 2160p`)** | `<slug>_master.mp4` → streamed via YouTube Resumable Upload API |
@@ -24,13 +24,13 @@ Every object in your DaVinci Resolve timeline compiles into a specific YouTube a
 Over 40% of technical YouTube watch time happens on living-room TVs, tablets, or full-screen monitors where clicking description links is inconvenient. `davag` includes an **offline, zero-dependency ISO/IEC 18004 vector `<svg>` QR generator** (`davag.youtube.qr`) paired with the deterministic Headless Chrome/Edge CDP renderer:
 
 1. **Three Ways to Add an In-Video QR Link Callout:**
-   - **In the Web GUI (`✨ overlays` tab):** Enter a Title (`"Interactive Nyquist Notebook"`), URL (`https://github.com/...`), and Timecode (or click **`📍 Playhead`**), preview the live `<svg>` QR card, and click **`🎬 Render QR to Timeline`**.
-   - **Directly inside DaVinci Resolve (`M` key):** Press `M` on the timeline, set Marker Color to **`Purple`**, set Name to `"Interactive Nyquist Notebook"`, and paste `https://github.com/...` in the Marker Note. When `youtube.stage` runs, it automatically renders and places `6.5s` ProRes 4444 QR overlays for every `Purple` marker!
+   - **In the Web GUI (`🎬 timeline` tab):** Press `Q` (or click **`○ +QR`**) to drop a `Purple` QR marker at hover/playhead, enter a Title (`"Interactive Nyquist Notebook"`) and URL (`https://github.com/...`), preview the live `<svg>` QR card, and click **`🎬 Render QR Overlay to V3`**.
+   - **Directly inside DaVinci Resolve (`M` key):** Press `M` on the timeline, set Marker Color to **`Purple`**, set Name to `"Interactive Nyquist Notebook"`, and paste `https://github.com/...` in the Marker Note. When `youtube.stage` runs, it automatically renders and places `6.5s` transparent QuickTime PNG QR overlays for every `Purple` marker!
    - **Via AI Agent (`motion.qr_callout` op):** Ask `davag`: *"Add a QR callout at `01:27:07` linking to `https://github.com/...` titled 'Try the Nyquist Demo'"*.
 
 2. **Why It Scans Reliably from 8+ Feet Away:**
    - Vector `<svg>` `shape-rendering="crispEdges"` with a 3-module pure-white quiet zone (`~280×280 px` on a 4K frame).
-   - Paired with a clean monospace display URL (`github.com/user/repo#nyquist`), animated progress bar, and cubic-bezier entrance/exit encoded in **10-bit ProRes 4444 Straight Alpha (`.mov`)** on an unobstructed `Overlays` video track (`Video 3` if `Video 2` holds your Facecam PiP).
+   - Paired with a clean monospace display URL (`github.com/user/repo#nyquist`), animated progress bar, and cubic-bezier entrance/exit muxed into lossless **QuickTime PNG Straight Alpha (`.mov`)** (or optional 10-bit ProRes 4444 via `codec: "prores"`) on an unobstructed `Overlays` video track (`Video 3` if `Video 2` holds your Facecam PiP).
 
 ---
 
@@ -63,9 +63,9 @@ Already uploaded your 4K master MP4 and want to add new GitHub links, update cha
 
 ## 4. Using the Unified `🎬 timeline` NLE Studio (Markers, VO Prompter & Overlays)
 
-Click **`✨ overlays`** in the top navigation bar to inspect, preview, and author overlays visually:
+Click **`🎬 timeline`** in the top navigation bar to inspect, scrub, prompt, and author VO cues, QR callouts, and JS motion overlays visually:
 
-0. **Interactive Visual Timeline & Hover/Drag Frame Loupe:** At the top of `✨ overlays`, a multi-track NLE timeline displays lazy-loaded scene thumbnails (`/api/overlays/thumb`), `V1`/`V2`/`V3` clips, `Cyan` chapter pins, `🟣 Purple` QR link pins, and the live red playhead. Hovering or scrubbing pops up a live 16:9 frame preview (`ss`) above your cursor (upgrading to Resolve's true multi-track composite when paused), and you can **drag markers or overlay clips horizontally** to re-time them directly in DaVinci Resolve!
-1. **Quick QR Link Callout Builder:** Type a Title + URL, click **`📍 Playhead`** to grab your current Resolve playhead timecode, see the live `<svg>` QR card preview immediately, and click **`🎬 Render QR to Timeline`** to render ProRes 4444 Alpha onto Resolve + drop the matching `Purple` marker.
-2. **Custom HTML / CSS / SVG / JS Motion Sandbox:** Edit HTML/SVG/JS (`window.renderFrame(f, t, dur, fps)`), drag the **Live Frame Scrubber (`0.0s .. dur`)** to preview exact animation frames in real time, and render straight onto your Resolve timeline.
-3. **Timeline Overlays, `Purple` Markers & Staged YouTube Bundles:** Lists every active overlay clip on `Video 2+`, every `Purple` link marker, every `.mov`/`.png` in `overlays/` (with **1-click browser frame preview** and **`⏭ Seek`** in Resolve), and your staged `youtube_manifest.json` release status.
+0. **Precision Tape-Measure Timeline, Hotkeys & Drag-to-Adjust:** At the top of `🎬 timeline`, a zoomable/pannable tape-measure ribbon displays geometric stemmed flags (`◇ Cyan` VO/Chapter `M`, `⬡ Mint` JS Overlay `O`, `○ Purple` QR Link `Q`, `△ Yellow` Note `N`), optional `V1`/`V2`/`V3` clip lanes, and the live red playhead. Hovering updates the large 16:9 Program Viewer (`/api/overlays/thumb`, with 1-click **`📸 HD Composite`** from Resolve) and synced VO Teleprompter HUD, and you can **drag markers or overlay clips horizontally** to re-time them directly in DaVinci Resolve!
+1. **Inline QR Link Callout Builder:** Select any `🟣 Purple` marker in the synced left accordion (or press `Q` to drop one), edit Title + URL with live `<svg>` QR preview, and click **`🎬 Render QR Overlay to V3`** to render a lightweight QuickTime PNG Alpha `.mov` onto Resolve.
+2. **Live HTML / CSS / SVG / JS Motion Sandbox & AI Co-Director:** Select any `🟢 Overlay` item, toggle **Live JS Sandbox** + the `t=0..dur` scrubber over the 16:9 Viewer to debug `window.renderFrame(f, t, dur)` in real time (live-updating via SSE as the AI streams `--davag:...--` code!), and click **`🎬 Render Overlay to Timeline`**.
+3. **Synced Browser & Staged YouTube Bundles:** Filter by `All`, `🔵 VO / Ch`, `🟣 QR`, `🟢 Overlays`, or `📦 YouTube`, push VO cues straight to Resolve `ST1` `.srt` & Fairlight ADR `.csv` (`📺 SRT/ADR`), and inspect staged `youtube_manifest.json` release status.

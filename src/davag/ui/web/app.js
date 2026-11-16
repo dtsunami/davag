@@ -189,7 +189,7 @@
         popSt.textContent = `✍️ streaming (${fullStream.length} chars)… ` + fullStream.slice(-90).replace(/\s+/g, ' ');
       }
       // Instant Realtime Hot-Swap: as soon as `--davag:end--` closes an HTML/SVG payload in the stream,
-      // live-composite it onto the 16:9 Viewer & Popover BEFORE ProRes encoding even finishes!
+      // live-composite it onto the 16:9 Viewer & Popover BEFORE overlay `.mov` rendering even finishes!
       const payloadMatch = fullStream.match(/--davag:[^\n]+--\n([\s\S]*?(?:<style|<svg|<div|<script)[\s\S]*?)\n--davag:end--/);
       if (payloadMatch && payloadMatch[1]) {
         window.dispatchEvent(new CustomEvent('davag-live-html', { detail: payloadMatch[1] }));
@@ -1062,7 +1062,7 @@
 
     if (!nleSelected) {
       scopeEl.textContent = `🤖 Target: Playhead ${curTc}`;
-      chipsEl.innerHTML = `<button type="button" class="ai-chip" data-p="Design and render a sleek animated JS/SVG ProRes 4444 callout overlay at ${curTc} (5.5s) highlighting the key metric on screen">➕ New JS Overlay @ ${curTc}</button>`;
+      chipsEl.innerHTML = `<button type="button" class="ai-chip" data-p="Design and render a sleek animated JS/SVG callout overlay at ${curTc} (5.5s) highlighting the key metric on screen">➕ New JS Overlay @ ${curTc}</button>`;
     } else if (nleSelected.kind === 'overlay' || String(nleSelected.color || '').toLowerCase() === 'mint') {
       scopeEl.textContent = `🤖 Target: 🟢 Overlay "${nleSelected.name}" @ ${nleSelected.tc} (${nleSelected.duration_sec}s)`;
       chipsEl.innerHTML = [
@@ -1149,7 +1149,7 @@
     }
   });
 
-  // Live SSE Hot-Swap Listener: activates Live JS Sandbox on 16:9 Viewer while ProRes encodes!
+  // Live SSE Hot-Swap Listener: activates Live JS Sandbox on 16:9 Viewer while overlay renders!
   window.addEventListener('davag-live-html', (ev) => {
     activeOvHtml = ev.detail;
     $('chk-ov-live-canvas').checked = true;
@@ -1157,7 +1157,7 @@
     const popSt = document.getElementById('pop-live-stream');
     if (popSt) {
       popSt.hidden = false;
-      popSt.textContent = '✨ New JS animation live on Viewer! Encoding ProRes 4444 render…';
+      popSt.textContent = '✨ New JS animation live on Viewer! Rendering transparent .mov…';
     }
   });
 
@@ -1508,7 +1508,7 @@
           <div class="tt-media"><video src="${videoUrl}" autoplay loop muted playsinline></video></div>
           <div class="muted" style="font-size:11px;">HTML / CSS / SVG / JS (\`window.renderFrame(f, t, dur)\`)</div>
           <textarea rows="6" class="mono-area js-acc-html" spellcheck="false">${escHtml(activeOvHtml)}</textarea>
-          <button type="button" class="btn primary small js-acc-render-ov">🎬 Render ProRes 4444 to V3</button>`;
+          <button type="button" class="btn primary small js-acc-render-ov">🎬 Render Overlay to Timeline</button>`;
       } else {
         modeBody = `
           <div class="muted" style="font-size:11px;">Marker Contents (Spoken Voiceover Cue / Note)</div>
@@ -1667,7 +1667,7 @@
       if (btnOv) {
         btnOv.onclick = async () => {
           btnOv.disabled = true;
-          btnOv.textContent = '⏳ Rendering ProRes 4444…';
+          btnOv.textContent = '⏳ Rendering Overlay…';
           try {
             await api('/api/overlays/render', {
               method: 'POST',

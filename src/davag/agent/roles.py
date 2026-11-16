@@ -91,10 +91,11 @@ EDITOR_MUTATE_OPS = LOGGER_MUTATE_OPS | frozenset(
         "project.save",
         "mediapool.create_bin",
         "mediapool.import",
-        "timeline.switch",
+        "timeline.select",
         "timeline.create",
         "timeline.duplicate",
         "timeline.append_clips",
+        "timeline.insert_title_or_generator",
         "timeline.set_clip_props",
         "timeline.set_clip_state",
         "timeline.import_timeline_file",
@@ -116,7 +117,6 @@ EDITOR_MUTATE_OPS = LOGGER_MUTATE_OPS | frozenset(
 
 FINISHER_MUTATE_OPS = EDITOR_MUTATE_OPS | frozenset(
     {
-        "project.set_settings",
         "color.apply_lut",
         "color.set_cdl",
         "color.grade",

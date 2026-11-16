@@ -135,10 +135,13 @@ def test_five_tier_role_surfaces_and_plan_batch_enforcement(tmp_path: Path) -> N
         )
     ) == 1
 
-    # 3. `editor` allows `timeline.create` & `motion.render_overlay`, blocks `render.start` & `shell`
+    # 3. `editor` allows `timeline.create`, `timeline.select` & `motion.render_overlay`, blocks `render.start` & `shell`
     assert (
         plan_batch(
-            [OpCall(index=0, op="motion.render_overlay", params={"name": "ov", "html": "<svg></svg>"})],
+            [
+                OpCall(index=0, op="timeline.select", params={"name": "Cut"}),
+                OpCall(index=1, op="motion.render_overlay", params={"name": "ov", "html": "<svg></svg>"}),
+            ],
             sandbox=sb,
             has_transport=True,
             role="editor",
@@ -388,7 +391,7 @@ def test_youtube_chapters_and_openrouter_image_extraction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_deterministic_html_svg_overlay_renders_prores_4444_alpha(tmp_path: Path) -> None:
+async def test_deterministic_html_svg_overlay_renders_quicktime_png_and_prores_alpha(tmp_path: Path) -> None:
     try:
         find_headless_browser()
     except RuntimeError:
@@ -407,20 +410,35 @@ async def test_deterministic_html_svg_overlay_renders_prores_4444_alpha(tmp_path
       };
     </script>
     """
-    out_mov = tmp_path / "overlay_test.mov"
-    res = await render_html_svg_overlay(
+    out_png_mov = tmp_path / "overlay_png.mov"
+    res_png = await render_html_svg_overlay(
         html_or_svg=html,
-        output_path=out_mov,
+        output_path=out_png_mov,
         width=640,
         height=360,
         fps=15.0,
         duration_sec=0.4,
     )
-    assert res["format"] == "prores_4444_alpha"
-    assert res["frames"] == 6
-    assert out_mov.is_file() and out_mov.stat().st_size > 1000
+    assert res_png["format"] == "mov_png_rgba"
+    assert res_png["frames"] == 6
+    assert out_png_mov.is_file() and out_png_mov.stat().st_size > 500
 
-    info = probe_media(out_mov)
-    assert info["video"]["codec"] == "prores"
-    assert info["video"]["width"] == 640
-    assert info["video"]["height"] == 360
+    info_png = probe_media(out_png_mov)
+    assert info_png["video"]["codec"] == "png"
+    assert info_png["video"]["width"] == 640
+    assert info_png["video"]["height"] == 360
+
+    out_prores = tmp_path / "overlay_prores.mov"
+    res_prores = await render_html_svg_overlay(
+        html_or_svg=html,
+        output_path=out_prores,
+        width=640,
+        height=360,
+        fps=15.0,
+        duration_sec=0.4,
+        codec="prores",
+    )
+    assert res_prores["format"] == "prores_4444_alpha"
+    info_prores = probe_media(out_prores)
+    assert info_prores["video"]["codec"] == "prores"
+    assert res_png["bytes"] < res_prores["bytes"]

@@ -1,13 +1,13 @@
 # Code-Based Motion Overlays (JS / CSS / SVG / Canvas -> DaVinci Resolve)
 
-`davag` lets the AI agent (or you) author **rich, resolution-independent data visualizations, callouts, lower-thirds, token counters, and animated diagrams** in standard HTML, CSS, SVG, and JavaScript, and drop them straight onto **`Video 2`** over your DaVinci Resolve timeline with **10-bit straight alpha transparency**.
+`davag` lets the AI agent (or you) author **rich, resolution-independent data visualizations, callouts, lower-thirds, token counters, QR cards, and animated diagrams** in standard HTML, CSS, SVG, and JavaScript, and drop them straight onto an unobstructed **Overlay track (`Video 2+`)** over your DaVinci Resolve timeline with **lossless straight alpha transparency**.
 
-## Why Deterministic CDP -> ProRes 4444 Alpha?
+## Why Deterministic CDP -> QuickTime PNG `.mov` (with Optional ProRes 4444)?
 
 1. **Zero dropped frames:** Unlike screen-recording a browser in real time, `motion.render_overlay` steps a virtual clock frame-by-frame (`f = 0 .. N-1`) over local Headless Chrome/Edge DevTools Protocol (`aiohttp` WebSocket — zero extra dependencies).
 2. **Full Web Graphics Stack:** Every CSS3 glassmorphism filter, custom typography, inline `<svg>` path morph, HTML5 `<canvas>` chart, Web Animations API timeline, or JS function works identically.
-3. **Broadcast Codec Native to Resolve:** Frames pipe directly into FFmpeg `prores_ks -profile:v 4444 -pix_fmt yuva444p10le` (`.mov`), preserving crisp anti-aliased RGBA alpha edges, automatically matched to your open Resolve project's resolution (e.g. `3840×2160` 4K) and frame rate (`30fps`).
-4. **Native Lottie `.json` Option:** DaVinci Resolve 21.1+ also imports vector Lottie `.json` animations natively via `mediapool.import` + `timeline.append_clips`.
+3. **Lightweight Lossless Alpha by Default (`codec: "png"`):** Chrome CDP already emits DEFLATE-compressed RGBA PNG frames where transparent canvas space compresses to near-zero bytes. `davag` muxes those PNG frames directly into `.mov` (`ffmpeg -c:v copy` — zero CPU re-encode, **~10×–25× smaller** than ProRes on sparse callouts/QR cards, native to DaVinci Resolve Free & Studio), matched to your open project's resolution and FPS. Pass `"codec": "prores"` whenever you want 10-bit `prores_ks -profile:v 4444 -pix_fmt yuva444p10le`.
+4. **Native Lottie `.json` & Future Bounding-Box Crop:** DaVinci Resolve 21.1+ also imports vector Lottie `.json` animations natively via `mediapool.import` + `timeline.append_clips`. *(Planned next step: automatic DOM bounding-box `clip` crop + Resolve `Pan`/`Tilt` placement to avoid rasterizing empty full-frame canvas space altogether.)*
 
 ## Authoring Contract (`motion.render_overlay`)
 

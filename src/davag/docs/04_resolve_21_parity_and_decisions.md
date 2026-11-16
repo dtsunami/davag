@@ -10,12 +10,12 @@
 | **Timeline Create, Append, Duplicate & `/undo`** | **Full** | `timeline.create`, `timeline.duplicate`, `timeline.append_clips` (`record_tc`, `media_type`), `.davag-snap-*` |
 | **In-Place Trim, Slip, Move, Gaps & Silence** *(21.1.2+)* | **Full** | `timeline.trim_and_move` (`SetLeftOffset`, `SetRightOffset`, `SetPosition`, `DeleteGaps`, `RippleDeleteSilence`) |
 | **Transitions, Fades & Constant Retime** *(21.1+)* | **Full** | `timeline.transitions_and_fades` (`AddTransition`, `SetFades`), `timeline.set_speed` (`SetSpeed`, `Stabilize`, `SmartReframe`) |
-| **Markers, VO Teleprompter & Fairlight ADR** | **Full** | `marker.*`, `timeline.vo_script` (`.csv` ADR + on-screen `ST1` `.srt` + live Web `🎙 prompter`), `timeline.create_subtitles`, `timeline.import_srt` |
-| **JS / CSS / SVG / Canvas Motion Overlays** | **Full** | `motion.render_overlay` (Headless Chrome/Edge CDP -> 10-bit ProRes 4444 Straight-Alpha `.mov` on `Video 2`) |
+| **Markers, VO Teleprompter & Fairlight ADR** | **Full** | `marker.*`, `timeline.vo_script` (`.csv` ADR + on-screen `ST1` `.srt` + live Web `🎬 timeline` VO HUD), `timeline.create_subtitles`, `timeline.import_srt` |
+| **JS / CSS / SVG / Canvas Motion Overlays & QR** | **Full** | `motion.render_overlay`, `motion.qr_callout` (Headless Chrome/Edge CDP -> QuickTime PNG or ProRes 4444 Straight-Alpha `.mov` on `Video 2+`) |
 | **Color LUTs, CDLs, DRX Stills & AI Auto-Color** *(21.2)* | **High** | `color.apply_lut`, `color.set_cdl`, `color.grade` (`GetCDL`, `ApplyAutoColor`, `ApplyGradeFromDRX`, `ResetAllGrades`) |
 | **Fairlight Loudness, Voice Isolation & TTS** *(21.1+)* | **High** | `audio.enhance` (`NormalizeAudioLevel` `-14 LKFS`, `VoiceIsolation`, `DialogueLeveler`, `AnalyzeAudioLevels`, `GenerateSpeech`) + `media.master_vo` |
 | **Fusion Compositions & Text+ Titles** | **Full** | `fusion.inspect_comp`, `fusion.set_tool_input`, `resolve.eval` |
-| **Deliver Render & YouTube Staging** | **Full** | `render.*`, `youtube.thumbnail`, `youtube.stage`, `youtube.upload` |
+| **Deliver Render & YouTube Staging** | **Full** | `render.*`, `youtube.thumbnail`, `youtube.stage`, `youtube.upload`, `youtube.update` |
 | **DaVinci Resolve Free Edition** | **Supported** | `otio.build` (`.otio` / `.fcpxml`) + zero-dependency `BridgeTransport` |
 
 ## Explicit Vendor API Gaps & Workaround Decisions

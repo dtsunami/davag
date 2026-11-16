@@ -486,7 +486,7 @@ async def stage_youtube_package(
     if eff_comment:
         (pkg_dir / "COMMENT.md").write_text(eff_comment + "\n", encoding="utf-8")
 
-    # 4. Append Thumbnail as Final End-Screen Slate on `Video 1` by default (5.0s for YouTube End Cards)
+    # 4. Append Thumbnail as Final End-Screen Slate on `Video 1` by default (8.0s dimmed/blurred for YouTube End Cards)
     end_screen_info: dict[str, Any] | None = None
     if append_end_screen and end_screen_sec > 0 and staged_thumb.is_file():
         v_tracks = tl_state.get("tracks", {}).get("video", [])

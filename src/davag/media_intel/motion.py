@@ -9,9 +9,10 @@ How it works (Remotion-style deterministic frame stepping with zero extra pip de
      c) Native `<svg>` SMIL animations (`svg.setCurrentTime(timeSec)`).
 2. Launches local Headless Chrome / Microsoft Edge with `--remote-debugging-port=0` and
    `Emulation.setDefaultBackgroundColorOverride({r:0, g:0, b:0, a:0})` for true RGBA transparency.
-3. Steps frame `0 .. total_frames - 1` over local CDP WebSocket (`aiohttp`) and pipes lossless RGBA
-   PNG frames directly into FFmpeg `prores_ks -profile:v 4444 -pix_fmt yuva444p10le` -> `.mov`
-   (10-bit ProRes 4444 with Straight Alpha, native to DaVinci Resolve!).
+3. Steps frame `0 .. total_frames - 1` over local CDP WebSocket (`aiohttp`) and muxes lossless RGBA
+   PNG frames directly into a QuickTime PNG `.mov` (`-c:v copy`, zero re-encode, ~10-25x smaller on
+   sparse overlays, Straight Alpha native to DaVinci Resolve Free & Studio!), with optional `codec="prores"`
+   for 10-bit ProRes 4444 (`prores_ks -profile:v 4444 -pix_fmt yuva444p10le`).
    - For static callouts/cards (`duration_sec == 0` or `static=True`), outputs a crisp 32-bit RGBA `.png`.
 """
 
@@ -122,18 +123,24 @@ async def render_html_svg_overlay(
     fps: float = 30.0,
     duration_sec: float = 4.0,
     static: bool = False,
+    codec: str = "png",
 ) -> dict[str, Any]:
-    """Deterministically render HTML/CSS/SVG/Canvas/JS into a ProRes 4444 Alpha `.mov` (or RGBA `.png`)."""
+    """Deterministically render HTML/CSS/SVG/Canvas/JS into a QuickTime PNG or ProRes 4444 Alpha `.mov` (or RGBA `.png`)."""
     browser_exe = find_headless_browser()
     ffmpeg = shutil.which("ffmpeg")
     if not static and not ffmpeg:
-        raise RuntimeError("ffmpeg is required to encode ProRes 4444 transparent overlay video.")
+        raise RuntimeError("ffmpeg is required to mux/encode transparent overlay video.")
+
+    codec_norm = (codec or "png").strip().lower()
+    if codec_norm not in ("png", "prores", "prores_4444"):
+        raise ValueError(f"Unsupported overlay codec '{codec}' (expected 'png' or 'prores').")
+    use_prores = codec_norm in ("prores", "prores_4444")
 
     dst = Path(output_path).resolve()
     is_static = static or duration_sec <= 0 or dst.suffix.lower() == ".png"
     if is_static and dst.suffix.lower() != ".png":
         dst = dst.with_suffix(".png")
-    elif not is_static and dst.suffix.lower() not in (".mov", ".webm"):
+    elif not is_static and dst.suffix.lower() != ".mov":
         dst = dst.with_suffix(".mov")
     dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -211,6 +218,20 @@ async def render_html_svg_overlay(
                     dst.write_bytes(png_bytes)
                 else:
                     assert ffmpeg is not None
+                    v_codec_args = (
+                        [
+                            "-c:v",
+                            "prores_ks",
+                            "-profile:v",
+                            "4444",
+                            "-pix_fmt",
+                            "yuva444p10le",
+                            "-vendor",
+                            "apl0",
+                        ]
+                        if use_prores
+                        else ["-c:v", "copy"]
+                    )
                     ff_cmd = [
                         ffmpeg,
                         "-y",
@@ -225,14 +246,7 @@ async def render_html_svg_overlay(
                         f"{fps:.4f}",
                         "-i",
                         "-",
-                        "-c:v",
-                        "prores_ks",
-                        "-profile:v",
-                        "4444",
-                        "-pix_fmt",
-                        "yuva444p10le",
-                        "-vendor",
-                        "apl0",
+                        *v_codec_args,
                         str(dst),
                     ]
                     ff_proc = await asyncio.create_subprocess_exec(
@@ -271,7 +285,8 @@ async def render_html_svg_overlay(
                     rc = ff_proc.returncode
                     ff_proc = None
                     if rc != 0:
-                        raise RuntimeError(f"FFmpeg ProRes 4444 encode failed: {ff_err_bytes.decode('utf-8', errors='replace').strip()}")
+                        label = "ProRes 4444 encode" if use_prores else "QuickTime PNG mux"
+                        raise RuntimeError(f"FFmpeg {label} failed: {ff_err_bytes.decode('utf-8', errors='replace').strip()}")
     finally:
         if ff_proc is not None:
             with contextlib.suppress(Exception):
@@ -292,5 +307,5 @@ async def render_html_svg_overlay(
         "fps": fps,
         "frames": total_frames,
         "duration_sec": 0.0 if is_static else round(total_frames / fps, 3),
-        "format": "png_rgba" if is_static else "prores_4444_alpha",
+        "format": "png_rgba" if is_static else ("prores_4444_alpha" if use_prores else "mov_png_rgba"),
     }

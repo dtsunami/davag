@@ -30,6 +30,7 @@ class RenderOverlayBody(BaseModel):
     duration_sec: float = 6.5
     position: str = "bottom-right"
     static: bool = False
+    codec: str = "png"
     add_marker: bool = True
 
 
@@ -429,6 +430,7 @@ async def api_overlays_render(body: RenderOverlayBody, st: StateDep) -> JSONResp
                 "url": body.url.strip(),
                 "duration_sec": body.duration_sec,
                 "position": body.position,
+                "codec": body.codec,
                 "add_marker": body.add_marker,
                 **({"record_tc": body.record_tc.strip()} if body.record_tc else {}),
             },
@@ -444,6 +446,7 @@ async def api_overlays_render(body: RenderOverlayBody, st: StateDep) -> JSONResp
                 "html": body.html,
                 "duration_sec": body.duration_sec,
                 "static": body.static,
+                "codec": body.codec,
                 **({"record_tc": body.record_tc.strip()} if body.record_tc else {}),
             },
         )

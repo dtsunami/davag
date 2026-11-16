@@ -5,7 +5,7 @@ Replaces the legacy 1,000-line `aiohttp.web` closure monolith with clean typed F
   context ledger, prompt editor, model/key/.env profiles, roles, artifacts, and `/api/docs`.
 - `routes_resolve.py`: DaVinci Resolve Live Inspector, Clip Studio, Voiceover Teleprompter, & media stills.
 - `routes_overlays.py`: Interactive visual timeline, lazy-loaded disk-cached frame thumbnails,
-  drag-to-adjust markers/overlays, and ISO SVG QR + ProRes 4444 motion overlay rendering.
+  drag-to-adjust markers/overlays, and ISO SVG QR + QuickTime PNG / ProRes 4444 motion overlay rendering.
 """
 
 from __future__ import annotations

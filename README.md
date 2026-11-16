@@ -4,18 +4,18 @@ An agentic CLI REPL + Web Studio GUI for **DaVinci Resolve 21+** (Studio & Free)
 
 ## Highlights
 
-- **Dual DaVinci Resolve Transport:** Zero-click Direct IPC (`fusionscript.dll` on Studio) **and** zero-dependency in-process TCP Bridge (`Workspace → Scripts → Utility → davag_bridge` on Free & Studio) executing the same **41 stdlib-only `davag.resolve_ops`**.
+- **Dual DaVinci Resolve Transport:** Zero-click Direct IPC (`fusionscript.dll` on Studio) **and** zero-dependency in-process TCP Bridge (`Workspace → Scripts → Utility → davag_bridge` on Free & Studio) executing the same **46 stdlib-only `davag.resolve_ops`**.
 - **Token-Efficient Visual & Audio Intelligence:**
   - **Mosaic Contact Sheets (`media.contact_sheet` / `/sheet`):** `4×4`–`6×6` storyboards with burned-in `HH:MM:SS:FF fNNNN` (~2,050 tokens for 16 frames — **100×–1,000× cheaper than raw video**).
   - **Scout Model Indexer (`media.analyze_clip` / `/index`):** Fast multimodal Scout (`gemini-3.8-flash`) indexes long recordings into persistent `~/.davag/cache/digests/` summaries.
   - **Hardware GPU Proxies (`/proxy` & Resolve Studio Tab):** Intel Arc QuickSync (`av1_qsv`, `h264_qsv`) & NVIDIA NVENC proxies at `360p` / `540p` / `720p` / `1080p`, auto-linked into Resolve and playable right inside the Web GUI.
-- **Synced Voiceover Teleprompter & Fairlight ADR (`/vo` & `🎙 prompter` Tab):**
-  - Converts timeline markers into a **Fairlight ADR Cue Sheet `.csv`**, an **on-screen Resolve Subtitle track (`ST1: VO Teleprompter`)**, and a **live playhead-synced Web Teleprompter** (works on desktop or phone over LAN!).
-- **Deterministic JS / CSS / SVG / Canvas Motion Overlays (`motion.render_overlay`):**
-  - Renders code-authored HTML/SVG/Canvas animations via headless Chrome/Edge CDP (`window.renderFrame(f, t, dur, fps)`) into **10-bit ProRes 4444 Straight-Alpha `.mov`** clips and drops them directly onto `Video 2` over your timeline!
+- **Synced Voiceover Teleprompter & Fairlight ADR (`/vo` & `🎬 timeline` Tab):**
+  - Converts timeline markers into a **Fairlight ADR Cue Sheet `.csv`**, an **on-screen Resolve Subtitle track (`ST1: VO Teleprompter`)**, and a **live playhead-synced Web Teleprompter** inside the unified `🎬 timeline` Studio (works on desktop or phone over LAN!).
+- **Deterministic JS / CSS / SVG / Canvas Motion Overlays (`motion.render_overlay`, `motion.qr_callout`):**
+  - Renders code-authored HTML/SVG/Canvas animations & scannable ISO QR cards via headless Chrome/Edge CDP (`window.renderFrame(f, t, dur, fps)`) into lightweight **QuickTime PNG Straight-Alpha `.mov`** clips (`-c:v copy`, ~10–25× smaller than ProRes, with optional `codec: "prores"` for 10-bit ProRes 4444) and drops them directly onto an unobstructed Overlay track!
 - **5-Tier Role Surfaces (`--role`, `/role`):** `reviewer` (read-only) → `logger` → `editor` → `finisher` → `master`.
-- **YouTube Delivery & OpenRouter Flux Thumbnails (`/thumbnail`, `/youtube-stage`, `youtube.upload`):**
-  - Multimodal 16:9 thumbnail generation (`black-forest-labs/flux.2-pro` / `flux-3` via OpenRouter with live Resolve viewer reference frames), auto-formatted `00:00` YouTube Chapters from markers, `.srt` captions, Deliver queue, and gated `private`-draft YouTube Data API v3 upload.
+- **YouTube Delivery & OpenRouter Flux Thumbnails (`/thumbnail`, `/youtube-stage`, `youtube.upload`, `youtube.update`):**
+  - Multimodal 16:9 thumbnail generation (`black-forest-labs/flux.2-pro` / `flux-3` via OpenRouter with live Resolve viewer reference frames), auto-formatted `00:00` YouTube Chapters from `Cyan` markers, QR & timestamped links from `Purple` markers, `.srt` captions, `8.0s` card-ready dimmed End-Screen slate, Deliver queue, and gated YouTube Data API v3 upload/update.
 
 ## Quickstart
 
@@ -42,6 +42,8 @@ python -m venv .venv
 | `/transcribe <clip> [s dur]` | Extract frame-mapped speech transcript & attach |
 | `/vo [prefix]` | Build Fairlight ADR `.csv` + import on-screen `.srt` VO Teleprompter onto `ST1` |
 | `/thumbnail <prompt>` | Generate 16:9 YouTube thumbnail via OpenRouter Flux (+ current viewer frame) |
-| `/youtube-stage <title>` | Build `youtube_staging/<slug>/` (chapters, `.srt`, `DESCRIPTION.md`, render job) |
+| `/youtube-stage <title>` | Build `youtube_staging/<slug>/` (chapters, QR overlays, `.srt`, `DESCRIPTION.md`, render job) |
+| `/youtube-auth [json_path]` | Run one-time Google OAuth browser flow & save `~/.davag/youtube_token.json` |
+| `/web [open\|copy\|token]` | Show tokenized Web Studio URL, open in browser, or copy URL/token |
 | `/undo` | Restore active Resolve timeline from previous `.davag-snap-*` checkpoint |
 | `/model <id> [--save]` | Switch live between `gemini-4-carbon`, `opus`, `sonnet`, `flash`, `gpt`, or OpenRouter |

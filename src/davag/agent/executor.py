@@ -431,6 +431,7 @@ async def _exec_media_op(
                 "html": qr_html,
                 "duration_sec": float(p.get("duration_sec", 6.5)),
                 "static": bool(p.get("static", False)),
+                **({"codec": p["codec"]} if p.get("codec") else {}),
                 **({"record_tc": p["record_tc"]} if p.get("record_tc") else {}),
                 **({"track_index": p["track_index"]} if p.get("track_index") is not None else {}),
                 **({"output_path": p["output_path"]} if p.get("output_path") else {}),
@@ -481,6 +482,7 @@ async def _exec_media_op(
             fps=fps,
             duration_sec=float(p.get("duration_sec", 4.0)),
             static=bool(p.get("static", False)),
+            codec=str(p.get("codec", "png")),
         )
 
         # Optionally import into Resolve `Overlays` bin & place onto an unobstructed Overlay Video track!

@@ -8,9 +8,9 @@ Scope what `davag` is permitted to see in its system prompt **and** what `execut
 |---|---|---|
 | **`reviewer`** | Read-only Resolve inspection (`timeline.get_state`, `marker.list`, `grab_still`), `media.contact_sheet`, `media.analyze_clip`, `media.transcribe`, `fs.read` | **All** timeline, bin, marker, color, render, and file mutations |
 | **`logger`** | Everything in `reviewer` + `marker.add`/`delete`, `timeline.vo_script`, `media.save_digest`, `media.generate_resolve_proxy`, `mediapool.link_proxy` | Cutting/modifying timelines, Color, Fusion, Deliver, file writes |
-| **`editor`** | Everything in `logger` + `timeline.*` assembly/trimming/transitions/speed/subtitles, `motion.render_overlay`, `audio.enhance`, `media.master_vo`, `otio.build`, `fs.write`/`replace` | `destructive` deletes, Deliver renders, `youtube.upload`, `resolve.eval`, `shell` |
-| **`finisher`** | Everything in `editor` + `color.*`, `fusion.*`, `render.*`, `youtube.thumbnail`, `youtube.stage` | `resolve.eval`, `shell`, `youtube.upload`, `destructive` deletes |
-| **`master`** | Full capability surface (default). `resolve.eval`, `shell`, `youtube.upload`, and `destructive` ops still pause for explicit operator `[y/c/n]` approval unless `--yolo`. | None |
+| **`editor`** | Everything in `logger` + `timeline.*` assembly/select/trimming/transitions/speed/subtitles, `motion.render_overlay`, `motion.qr_callout`, `audio.enhance`, `media.master_vo`, `otio.build`, `fs.write`/`replace` | `destructive` deletes, Deliver renders, `youtube.upload`/`update`, `resolve.eval`, `shell` |
+| **`finisher`** | Everything in `editor` + `color.*`, `fusion.*`, `render.*`, `youtube.thumbnail`, `youtube.stage` | `resolve.eval`, `shell`, `youtube.upload`/`update`, `destructive` deletes |
+| **`master`** | Full capability surface (default). `resolve.eval`, `shell`, `youtube.upload`, `youtube.update`, and `destructive` ops still pause for explicit operator `[y/c/n]` approval unless `--yolo`. | None |
 
 Switch anytime via CLI (`davag --role reviewer`), REPL (`/role editor`), `.env` (`DAVAG_ROLE=editor`), or the **Role** dropdown in the Web GUI header!
 
@@ -54,8 +54,8 @@ DAVAG_IMAGE_MODEL=black-forest-labs/flux.2-pro
    - `youtube_manifest.json` — title, tags, category (`28` Science & Tech), `privacy_status: "private"`, video/thumbnail/SRT paths.
    - `DESCRIPTION.md` — intro copy + **YouTube-compliant Chapters** generated automatically from your Resolve timeline markers (enforcing `00:00` start and `>=10s` spacing).
    - `<slug>_captions.srt` — `00:00:00,000`-aligned caption file.
-   - **5-second Thumbnail Final Screen (`append_end_screen: true` by default):** Automatically renders a resolution/FPS-matched 5s end-screen slate from your thumbnail (with smooth fade-in/out) and appends it to the end of `Video 1` before queueing the render, ready for YouTube Studio End Screen cards.
+   - **8-second Card-Ready Dimmed End-Screen Slate (`append_end_screen: true`, `end_screen_sec: 8.0` by default):** Automatically renders a resolution/FPS-matched `8.0s` softly blurred, darkened (`-28%` brightness) end-screen slate from your thumbnail (with smooth fade-in/out) and appends it to the end of `Video 1` before queueing the render, ready for YouTube Studio End Screen cards.
    - Queued H.264/MP4 Deliver render job in Resolve (`render_job_id`).
-2. **Optional Direct Upload as a `private` YouTube Studio Draft (`youtube.upload`):**
-   - Place OAuth2 refresh credentials in `~/.davag/youtube_token.json` (`{"client_id": "...", "client_secret": "...", "refresh_token": "..."}`).
-   - `youtube.upload` is **always approval-gated**: once approved, it streams the rendered MP4 via YouTube Data API v3's resumable upload endpoint as `"privacyStatus": "private"` and attaches `thumbnail.png`, returning your `https://studio.youtube.com/video/<id>/edit` link for final human review.
+2. **Optional Direct Upload & In-Place Metadata Update (`youtube.upload` & `youtube.update`):**
+   - Run `/youtube-auth <client_secret.json>` once (or place OAuth2 refresh credentials in `~/.davag/youtube_token.json`).
+   - `youtube.upload` and `youtube.update` are **always approval-gated**: `youtube.upload` streams the rendered MP4, `thumbnail.png`, `.srt` captions, and optional top comment (`COMMENT.md` when `unlisted`/`public`) via YouTube Data API v3; `youtube.update` updates title, description links/chapters, privacy status, thumbnail, and first comment in `<1s` without re-uploading the MP4.
