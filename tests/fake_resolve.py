@@ -33,6 +33,7 @@ class FakeMediaPoolItem:
         return self.unique_id
 
     def GetClipProperty(self, key: str | None = None) -> Any:
+        extra = getattr(self, "_extra_clip_props", {})
         props = {
             "Clip Name": self.name,
             "File Path": self.file_path,
@@ -44,10 +45,17 @@ class FakeMediaPoolItem:
             "Proxy Media Path": getattr(self, "proxy_media_path", ""),
             "Start": "0",
             "End": str(max(0, self.frames - 1)),
+            **extra,
         }
         if key is None:
             return props
         return props.get(key, "")
+
+    def SetClipProperty(self, key: str, value: Any) -> bool:
+        if not hasattr(self, "_extra_clip_props"):
+            self._extra_clip_props: dict[str, str] = {}
+        self._extra_clip_props[str(key)] = str(value)
+        return True
 
     def LinkProxyMedia(self, proxy_file_path: str) -> bool:
         self.proxy_media_path = proxy_file_path

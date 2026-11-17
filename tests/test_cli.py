@@ -297,3 +297,18 @@ async def test_multihop_resume_accumulates_transcript_stats_perf_and_resets_spen
         assert r3_blocked["status"] == "over_budget"
     finally:
         await s3.close()
+
+
+def test_doctor_reports_motion_overlay_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("DAVAG_HOME", str(tmp_path / "davag_home"))
+    monkeypatch.setenv("DAVAI_HOME", str(tmp_path / "davai_home"))
+    rc = main(["--doctor"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Motion Overlay Engine" in out
+    assert "svg fast path" in out
+    assert "canvas fast path" in out
+    assert "html/css cdp pool" in out
+    assert "alpha codecs" in out

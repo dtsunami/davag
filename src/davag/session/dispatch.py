@@ -162,6 +162,8 @@ def create_dispatcher(
             except Exception as err:  # noqa: BLE001
                 _push({"type": "warning", "message": str(err)}, origin=origin)
 
+        if session.transport is None:
+            await session.maybe_auto_connect_resolve()
         _push({"type": "user", "text": without_media}, origin=origin)
         await session.agent.run(without_media)
 

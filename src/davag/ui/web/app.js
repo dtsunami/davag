@@ -5,6 +5,7 @@
   let lastSeq = 0;
   let commands = [];
   let catalog = null;
+  let lanAuthUrl = null;
   const approvalQueue = [];
 
   async function api(path, opts = {}) {
@@ -65,17 +66,94 @@
     }
   }
 
+  const PY_TOKEN_RE = /(#.*$)|("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|\b(def|class|return|if|elif|else|for|while|in|not|and|or|import|from|as|with|try|except|finally|raise|True|False|None|async|await|lambda|pass|break|continue)\b|\b(\d+(?:\.\d+)?)\b|\b([A-Za-z_][A-Za-z0-9_]*)(?=\s*\()/gm;
+
+  function highlightPythonLine(line) {
+    let out = '';
+    let last = 0;
+    PY_TOKEN_RE.lastIndex = 0;
+    let m;
+    while ((m = PY_TOKEN_RE.exec(line)) !== null) {
+      out += escHtml(line.slice(last, m.index));
+      if (m[1]) out += `<span class="ap-cmt">${escHtml(m[1])}</span>`;
+      else if (m[2]) out += `<span class="ap-str">${escHtml(m[2])}</span>`;
+      else if (m[3]) out += `<span class="ap-kw">${escHtml(m[3])}</span>`;
+      else if (m[4]) out += `<span class="ap-num">${escHtml(m[4])}</span>`;
+      else if (m[5]) out += `<span class="ap-fn">${escHtml(m[5])}</span>`;
+      last = m.index + m[0].length;
+    }
+    out += escHtml(line.slice(last));
+    return out;
+  }
+
+  function renderLineNumberedCode(src, isPython) {
+    const lines = String(src || '').replace(/^\n+|\n+$/g, '').split('\n');
+    return lines
+      .map((ln, i) => `<span class="ap-ln">${i + 1}</span>${isPython ? highlightPythonLine(ln) : escHtml(ln)}`)
+      .join('\n');
+  }
+
+  function formatApprovalOp(opObj) {
+    if (!opObj || typeof opObj !== 'object') return escHtml(String(opObj || ''));
+    const env = {};
+    const blocks = [];
+    for (const [k, v] of Object.entries(opObj)) {
+      if (typeof v === 'string' && (v.includes('\n') || (['code', 'cmd', 'html', 'text'].includes(k) && v.length > 96))) {
+        env[k] = `@${k}`;
+        blocks.push([k, v.replace(/\n+$/, '')]);
+      } else {
+        env[k] = v;
+      }
+    }
+    let out = escHtml(JSON.stringify(env, null, 2));
+    for (const [name, body] of blocks) {
+      out += `\n<span class="ap-fn">--davag:${escHtml(name)}--</span>\n${renderLineNumberedCode(body, name === 'code')}\n<span class="ap-fn">--davag:end--</span>`;
+    }
+    return out;
+  }
+
   function showNextApproval() {
     const box = $('approval-box');
+    const descEl = $('ap-desc');
     if (!approvalQueue.length) {
       box.hidden = true;
+      if (descEl) descEl.hidden = true;
       return;
     }
     const cur = approvalQueue[0];
+    const op = cur.op || {};
     box.hidden = false;
     $('ap-id').textContent = `(${cur.id})`;
-    $('ap-detail').textContent = JSON.stringify(cur.op, null, 2);
+    if (op.op === 'resolve.eval') {
+      if (descEl) {
+        descEl.hidden = false;
+        descEl.innerHTML = `<code>resolve.eval</code>${op.description ? ' — ' + escHtml(op.description) : ''}`;
+      }
+      $('ap-detail').innerHTML = renderLineNumberedCode(op.code || '', true);
+    } else if (op.op === 'shell') {
+      if (descEl) {
+        descEl.hidden = false;
+        descEl.innerHTML = `<code>shell</code>${op.cwd ? ' <span class="muted">(cwd: ' + escHtml(op.cwd) + ')</span>' : ''}`;
+      }
+      $('ap-detail').innerHTML = renderLineNumberedCode(op.cmd || '', false);
+    } else {
+      if (descEl) descEl.hidden = true;
+      $('ap-detail').innerHTML = formatApprovalOp(op);
+    }
   }
+
+  document.addEventListener('keydown', (e) => {
+    if ($('approval-box').hidden || e.ctrlKey || e.metaKey || e.altKey) return;
+    const el = document.activeElement;
+    const tag = (el && el.tagName) || '';
+    if (tag === 'INPUT' || tag === 'SELECT' || (el && el.isContentEditable)) return;
+    if (tag === 'TEXTAREA' && (el.id !== 'composer-input' || el.value)) return;
+    const k = e.key.toLowerCase();
+    if (k === 'y' || k === 'c' || k === 'n') {
+      e.preventDefault();
+      answerApproval(k !== 'n', k === 'c');
+    }
+  });
 
   async function answerApproval(allow, checkpointFirst = false) {
     if (!approvalQueue.length) return;
@@ -90,8 +168,19 @@
     }
     if ('yolo' in info) $('hdr-yolo').hidden = !info.yolo;
     if (info.role) $('sel-hdr-role').value = info.role;
+    if ('lan_auth_url' in info) lanAuthUrl = info.lan_auth_url || null;
     if ('resolve_connected' in info) {
-      $('hdr-resolve').textContent = info.resolve_connected ? `resolve: ${info.resolve_mode}` : 'resolve: offline';
+      const badge = $('hdr-resolve');
+      if (info.resolve_busy) {
+        badge.textContent = `resolve: ${info.resolve_mode || 'direct'} (busy)`;
+        badge.style.color = '#ffd166';
+      } else if (info.resolve_connected) {
+        badge.textContent = `resolve: ${info.resolve_mode || 'direct'}`;
+        badge.style.color = '#4cc9f0';
+      } else {
+        badge.textContent = 'resolve: offline ↻';
+        badge.style.color = '#ff8fab';
+      }
     }
     if (info.stats) {
       const s = info.stats;
@@ -299,6 +388,13 @@
       updateHeader({ yolo: d.yolo });
     });
 
+    es.addEventListener('resolve-changed', (e) => {
+      trackSeq(e);
+      const d = JSON.parse(e.data);
+      updateHeader({ resolve_connected: Boolean(d.connected), resolve_mode: d.mode || null, resolve_busy: false });
+      refreshResolveStrip();
+    });
+
     es.addEventListener('warning', (e) => {
       trackSeq(e);
       const d = JSON.parse(e.data);
@@ -319,14 +415,19 @@
 
   async function refreshResolveStrip() {
     try {
-      const r = await api('/api/resolve');
+      const r = await api('/api/resolve?full=0');
       if (!r.connected) {
-        $('strip-summary').textContent = `DaVinci Resolve: disconnected (${r.note || r.error || 'offline'})`;
-        updateHeader({ resolve_connected: false });
+        $('strip-summary').textContent = `DaVinci Resolve: disconnected (${r.note || r.error || 'click resolve badge to reconnect'})`;
+        updateHeader({ resolve_connected: false, resolve_busy: false });
+        return;
+      }
+      if (r.busy || !r.status) {
+        $('strip-summary').textContent = `DaVinci Resolve [${r.mode || 'direct'}]: busy (rendering / modal / IPC call in progress…)`;
+        updateHeader({ resolve_connected: true, resolve_mode: r.mode || 'direct', resolve_busy: true });
         return;
       }
       const st = r.status;
-      updateHeader({ resolve_connected: true, resolve_mode: st.mode });
+      updateHeader({ resolve_connected: true, resolve_mode: st.mode, resolve_busy: false });
       const proj = st.project ? st.project.name : 'none';
       const tl = st.timeline ? `${st.timeline.name} @ ${st.timeline.playhead_tc}` : 'no active timeline';
       $('strip-summary').textContent = `${st.product} ${st.version} [${st.mode}] · Project: ${proj} · Timeline: ${tl} · Page: ${st.page}`;
@@ -334,12 +435,19 @@
   }
 
   async function loadResolveInspector() {
-    const r = await api('/api/resolve');
+    const r = await api('/api/resolve?full=1');
     const box = $('resolve-inspector');
     if (!r.connected) {
       box.innerHTML = `<div class="card"><h3>Not Connected</h3><p class="muted">${r.note || r.error || ''}</p></div>`;
+      updateHeader({ resolve_connected: false, resolve_busy: false });
       return;
     }
+    if (r.busy || !r.status) {
+      box.innerHTML = `<div class="card"><h3>DaVinci Resolve Busy</h3><p class="muted">${r.error || 'Resolve is busy rendering or serving another IPC call — try Refresh in a moment.'}</p></div>`;
+      updateHeader({ resolve_connected: true, resolve_mode: r.mode || 'direct', resolve_busy: true });
+      return;
+    }
+    updateHeader({ resolve_connected: true, resolve_mode: r.status.mode, resolve_busy: false });
 
     const clipsHtml = (r.clips || []).filter((c) => c.file_path).map((c) => {
       const trText = c.transcript
@@ -865,9 +973,22 @@
       if (journalState.can_redo) runUndoRedo('redo');
     }
   });
-  $('btn-res-refresh').onclick = loadResolveInspector;
-  $('btn-res-direct').onclick = async () => { await api('/api/resolve/reconnect', { method: 'POST', body: { mode: 'direct' } }); loadResolveInspector(); };
-  $('btn-res-bridge').onclick = async () => { await api('/api/resolve/reconnect', { method: 'POST', body: { mode: 'bridge' } }); loadResolveInspector(); };
+  $('hdr-resolve').onclick = async () => {
+    const badge = $('hdr-resolve');
+    badge.textContent = 'resolve: connecting…';
+    try {
+      await api('/api/resolve/reconnect', { method: 'POST', body: {} });
+      await refreshResolveStrip();
+      if (!$('view-resolve').hidden) await loadResolveInspector();
+      if (!$('view-timeline').hidden) await loadTimelineStudio();
+    } catch (err) {
+      updateHeader({ resolve_connected: false, resolve_busy: false });
+      $('strip-summary').textContent = `DaVinci Resolve: ${err.message}`;
+    }
+  };
+  $('btn-res-refresh').onclick = async () => { await refreshResolveStrip(); await loadResolveInspector(); };
+  $('btn-res-direct').onclick = async () => { await api('/api/resolve/reconnect', { method: 'POST', body: { mode: 'direct' } }); await refreshResolveStrip(); await loadResolveInspector(); };
+  $('btn-res-bridge').onclick = async () => { await api('/api/resolve/reconnect', { method: 'POST', body: { mode: 'bridge' } }); await refreshResolveStrip(); await loadResolveInspector(); };
   $('btn-ctx-compact').onclick = async () => { await api('/api/compact', { method: 'POST' }); loadContextTab(); };
 
   $('btn-apply-model').onclick = async () => {
@@ -902,7 +1023,7 @@
   }
 
   $('btn-copy-url').onclick = async () => {
-    const share = `${location.origin}/?token=${encodeURIComponent(token)}`;
+    const share = lanAuthUrl || `${location.origin}/?token=${encodeURIComponent(token)}`;
     await navigator.clipboard.writeText(share);
     flashBtn($('btn-copy-url'), '✓ Copied URL!');
   };

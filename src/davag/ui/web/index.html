@@ -34,11 +34,9 @@
           <option value="finisher">role: finisher</option>
           <option value="master" selected>role: master</option>
         </select>
-        <span class="badge" id="hdr-resolve">resolve: —</span>
+        <button type="button" class="badge" id="hdr-resolve" style="border:1px solid #2b3d5c; cursor:pointer;" title="Click to check / reconnect DaVinci Resolve">resolve: —</button>
         <span class="badge danger" id="hdr-yolo" hidden>yolo</span>
         <span class="badge activity-badge" id="hdr-activity" hidden><span class="spin-ring small"></span><span id="hdr-activity-text">thinking…</span></span>
-        <button id="btn-copy-url" class="btn small" title="Copy tokenized share URL">🔗 Copy URL</button>
-        <button id="btn-copy-tok" class="btn small" title="Copy bearer token">🔑 Copy Token</button>
         <span class="spacer"></span>
         <span class="muted" id="hdr-stats">0t · $0.0000</span>
         <canvas id="hdr-spark" width="84" height="18" title="tok/s sparkline"></canvas>
@@ -84,10 +82,11 @@
           <!-- Raced Approval Banner -->
           <div id="approval-box" class="approval-box" hidden>
             <div class="approval-title">▲ Gated operation requires approval <span id="ap-id" class="muted"></span></div>
+            <div id="ap-desc" class="ap-desc" hidden></div>
             <pre id="ap-detail" class="ap-code"></pre>
             <div class="approval-actions">
               <button id="ap-allow" class="btn primary">Allow (y)</button>
-              <button id="ap-checkpoint" class="btn">Checkpoint Timeline & Allow</button>
+              <button id="ap-checkpoint" class="btn">Checkpoint Timeline &amp; Allow (c)</button>
               <button id="ap-deny" class="btn danger">Deny (n)</button>
             </div>
           </div>
@@ -329,6 +328,13 @@
               <hr />
               <h4>`.env` Provider Blocks</h4>
               <div id="env-blocks-list" class="stack"></div>
+              <hr />
+              <h4>Remote / Tablet Pairing</h4>
+              <p class="muted" style="margin:0; font-size:11.5px;">Open this session on an iPad, phone, or another browser window:</p>
+              <div class="row-gap">
+                <button type="button" id="btn-copy-url" class="btn small" title="Copy tokenized share URL (uses LAN IP when bound with --host 0.0.0.0)">🔗 Copy Pairing URL</button>
+                <button type="button" id="btn-copy-tok" class="btn small" title="Copy session bearer token">🔑 Copy Token</button>
+              </div>
             </div>
           </div>
         </section>

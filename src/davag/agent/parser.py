@@ -17,6 +17,10 @@ from typing import Any
 from .executor import OpCall
 
 FENCE_RE = re.compile(r"^([ \t]*)(`{3,}|~{3,})[ \t]*([^\s`]*)[ \t]*$")
+INLINE_OPS_FENCE_RE = re.compile(
+    r"([^\n`~])([ \t]*)(`{3,}|~{3,})[ \t]*(dr_ops|da_ops)(?=[ \t]*(?:\n|$))",
+    re.IGNORECASE,
+)
 PAYLOAD_OPEN_RE = re.compile(r"^--(?:davag|davai):([A-Za-z0-9_-]+)--[ \t]*$")
 PAYLOAD_CLOSE_RE = re.compile(r"^--(?:davag|davai):end--[ \t]*$")
 LONE_XML_TAG_RE = re.compile(r"^[ \t]*</?[A-Za-z_][A-Za-z0-9_.:-]*>[ \t]*$")
@@ -35,6 +39,7 @@ class FencedBlock:
     body: str
     start_line: int
     unterminated: bool = False
+    inline_fence: bool = False
 
 
 @dataclass
@@ -45,8 +50,27 @@ class ExtractedTurn:
     recovered: str | None = None
 
 
+def _split_glued_ops_fences(text: str) -> tuple[str, bool]:
+    """Heal mid-line `...prose!```dr_ops` fences emitted without a preceding newline.
+
+    Gemini 4 Carbon frequently glues ` ```dr_ops ` directly onto the end of an intro sentence
+    without a newline (`Let's execute this clean read batch first!```dr_ops`). Without splitting
+    that line, a line-anchored scanner misses the opening fence, treats the JSON body as prose,
+    and then matches the closing ` ``` ` as an empty 0-line `artifact #1 (0 lines)`!
+    """
+    healed = False
+
+    def _repl(m: re.Match[str]) -> str:
+        nonlocal healed
+        healed = True
+        return f"{m.group(1)}\n{m.group(3)}{m.group(4)}"
+
+    return INLINE_OPS_FENCE_RE.sub(_repl, text), healed
+
+
 def scan_blocks(text: str) -> tuple[list[FencedBlock], str]:
-    lines = text.split("\n")
+    normalized, split_inline = _split_glued_ops_fences(text)
+    lines = normalized.split("\n")
     blocks: list[FencedBlock] = []
     prose: list[str] = []
 
@@ -90,6 +114,7 @@ def scan_blocks(text: str) -> tuple[list[FencedBlock], str]:
                 body="\n".join(body),
                 start_line=start,
                 unterminated=not closed,
+                inline_fence=split_inline and is_ops,
             )
         )
 
@@ -198,6 +223,8 @@ def extract_turn(text: str) -> ExtractedTurn:
 
     blk = ops_blocks[0]
     calls, recovered = parse_ops_body(blk.body)
+    if blk.inline_fence:
+        recovered = f"{recovered}; inline opening fence" if recovered else "inline opening fence"
     if blk.unterminated:
         recovered = f"{recovered}; no closing fence" if recovered else "no closing fence"
 

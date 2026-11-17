@@ -46,11 +46,23 @@ class Session:
     agent: Agent
     bus: SessionBus
     transport: ResolveTransport | None
+    auto_connect_resolve: bool = True
     resolve_grounding_snapshot: str = ""
     resolve_connect_note: str | None = None
     agents_sections: list[dict[str, Any]] = field(default_factory=list)
     grounding_notices: list[str] = field(default_factory=list)
     pending_prompts: dict[str, Any] | None = None
+
+    async def maybe_auto_connect_resolve(self) -> bool:
+        """Opportunistically attach if Resolve was launched AFTER `davag` started."""
+        if self.transport is not None or not self.auto_connect_resolve:
+            return self.transport is not None
+        try:
+            await self.reconnect_resolve()
+            return True
+        except Exception as err:  # noqa: BLE001
+            self.resolve_connect_note = str(err).splitlines()[0]
+            return False
 
     async def reconnect_resolve(self, mode: str | None = None) -> dict[str, Any]:
         if self.transport is not None:
@@ -65,8 +77,12 @@ class Session:
             bridge_port=self.cfg.bridge_port,
         )
         self.agent.transport = self.transport
-        st = await self.transport.call("resolve.status", timeout=4.0)
+        st = await self.transport.call("resolve.status", timeout=8.0)
         self.resolve_connect_note = None
+        self.bus.publish(
+            "resolve-changed",
+            {"connected": True, "mode": self.transport.mode, "status": st},
+        )
         return st
 
     async def close(self) -> None:
@@ -217,6 +233,7 @@ async def bootstrap_session(
         agent=agent,
         bus=bus,
         transport=transport,
+        auto_connect_resolve=auto_connect_resolve,
         resolve_grounding_snapshot=resolve_snap,
         resolve_connect_note=connect_note,
         agents_sections=agents_sections,

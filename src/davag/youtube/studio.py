@@ -378,19 +378,30 @@ async def stage_youtube_package(
         if has_browser:
             ov_dir = staging_root.parent / "overlays"
             ov_dir.mkdir(parents=True, exist_ok=True)
-            for idx_lm, lm in enumerate(link_markers):
-                qr_slug = f"qr_{idx_lm + 1:02d}_{_slugify(lm['title'])[:28]}"
+            qr_sem = asyncio.Semaphore(3)
+
+            async def _render_one_qr(idx_lm: int, lm_item: dict[str, Any]) -> dict[str, Any]:
+                qr_slug = f"qr_{idx_lm + 1:02d}_{_slugify(lm_item['title'])[:28]}"
                 qr_mov = ov_dir / f"{qr_slug}.mov"
-                qr_html = build_qr_callout_html(title=lm["title"], url=lm["url"])
-                ov_res = await render_html_svg_overlay(
-                    html_or_svg=qr_html,
-                    output_path=qr_mov,
-                    width=width,
-                    height=height,
-                    fps=fps,
-                    duration_sec=6.5,
+                qr_html = build_qr_callout_html(title=lm_item["title"], url=lm_item["url"])
+                async with qr_sem:
+                    return await render_html_svg_overlay(
+                        html_or_svg=qr_html,
+                        output_path=qr_mov,
+                        width=width,
+                        height=height,
+                        fps=fps,
+                        duration_sec=6.5,
+                    )
+
+            rendered_qrs = await asyncio.gather(
+                *[_render_one_qr(idx_lm, lm) for idx_lm, lm in enumerate(link_markers)]
+            )
+            for lm, ov_res in zip(link_markers, rendered_qrs, strict=True):
+                imp_qr = await transport.call(
+                    "mediapool.import",
+                    {"paths": [ov_res["path"]], "bin_path": "Overlays", "alpha_mode": "Straight"},
                 )
-                imp_qr = await transport.call("mediapool.import", {"paths": [ov_res["path"]], "bin_path": "Overlays"})
                 imp_qr_clips = imp_qr.get("clips") or []
                 if imp_qr_clips:
                     v_tracks = tl_state.get("tracks", {}).get("video", [])

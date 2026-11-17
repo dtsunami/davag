@@ -423,6 +423,17 @@ async def test_deterministic_html_svg_overlay_renders_quicktime_png_and_prores_a
     assert res_png["frames"] == 6
     assert out_png_mov.is_file() and out_png_mov.stat().st_size > 500
 
+    import importlib.util
+    import shutil
+    import struct
+
+    if importlib.util.find_spec("resvg_py") and shutil.which("node"):
+        assert res_png["backend"] == "native_v8_resvg"
+
+    mov_bytes = out_png_mov.read_bytes()
+    png_entry_offset = mov_bytes.index(b"png ") - 4
+    assert struct.unpack_from(">H", mov_bytes, png_entry_offset + 82)[0] == 32
+
     info_png = probe_media(out_png_mov)
     assert info_png["video"]["codec"] == "png"
     assert info_png["video"]["width"] == 640
@@ -442,3 +453,149 @@ async def test_deterministic_html_svg_overlay_renders_quicktime_png_and_prores_a
     info_prores = probe_media(out_prores)
     assert info_prores["video"]["codec"] == "prores"
     assert res_png["bytes"] < res_prores["bytes"]
+
+    # Also verify QuickTime RLE (`qtrle`) + Straight-Alpha `stsd` depth=32 + dynamic `auto_clip` HTML card!
+    card_html = """
+    <div id="card" style="position:absolute; right:48px; bottom:48px; padding:16px 24px; background:rgba(15,20,32,0.92); border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,0.5); color:#fff;">
+      <span id="txt">Frame 0</span>
+    </div>
+    <script>
+      window.renderFrame = (f) => { document.getElementById('txt').textContent = 'Frame ' + f; };
+    </script>
+    """
+    out_qtrle = tmp_path / "overlay_qtrle.mov"
+    res_qtrle = await render_html_svg_overlay(
+        html_or_svg=card_html,
+        output_path=out_qtrle,
+        width=640,
+        height=360,
+        fps=15.0,
+        duration_sec=0.6,
+        codec="qtrle",
+        backend="cdp",
+    )
+    assert res_qtrle["format"] == "mov_qtrle_rgba"
+    assert res_qtrle["backend"] == "cdp_parallel"
+    assert res_qtrle["clip"] is not None  # Sparse card triggered `<4ms` dynamic auto_clip!
+    assert res_qtrle["clip"]["width"] < 640 and res_qtrle["clip"]["height"] < 360
+    info_qtrle = probe_media(out_qtrle)
+    assert info_qtrle["video"]["width"] == 640 and info_qtrle["video"]["height"] == 360
+
+    # Verify `native_node_canvas` fast path when `@napi-rs/canvas` is installed
+    from davag.media_intel.motion import probe_motion_capabilities
+
+    m_caps = probe_motion_capabilities()
+    if m_caps["node_canvas_module"]:
+        canvas_html = """<canvas id="c"></canvas>
+        <script>
+          window.renderFrame = (f, t, dur) => {
+            const c = document.getElementById('c');
+            const ctx = c.getContext('2d');
+            ctx.clearRect(0, 0, c.width, c.height);
+            ctx.fillStyle = '#4cc9f0';
+            ctx.fillRect(20, 20, 40 + f * 30, 60);
+          };
+        </script>"""
+        out_canvas = tmp_path / "overlay_canvas.mov"
+        res_canvas = await render_html_svg_overlay(
+            html_or_svg=canvas_html,
+            output_path=out_canvas,
+            width=320,
+            height=180,
+            fps=15.0,
+            duration_sec=0.3,
+            backend="native",
+        )
+        assert res_canvas["backend"] == "native_node_canvas"
+        assert res_canvas["format"] == "mov_png_rgba"
+
+
+@pytest.mark.asyncio
+async def test_stsd_depth32_patcher_mediapool_alpha_mode_and_batch_prerender(tmp_path: Path) -> None:
+    import struct
+
+    from davag.agent.executor import _prerender_batch_overlays, execute_batch
+    from davag.agent.journal import Journal
+    from davag.media_intel.motion import _classify_overlay_source, _ensure_mov_png_rgba_depth32
+    from davag.resolve_ops import OpError
+    from davag.transport import DirectTransport
+
+    from .fake_resolve import FakeResolve
+
+    # 1. Source classifier check
+    assert _classify_overlay_source("<svg viewBox='0 0 100 100'><rect/></svg><script>window.renderFrame=()=>{}</script>")[0] == "svg"
+    assert _classify_overlay_source("<canvas id='c'></canvas><script>window.renderFrame=()=>{}</script>")[0] == "canvas"
+    assert _classify_overlay_source("<div>card</div><script>window.renderFrame=()=>{}</script>")[0] == "html"
+
+    # 2. Synthetic QuickTime `moov -> trak -> mdia -> minf -> stbl -> stsd -> png ` with depth=24 -> patched to 32!
+    sample_entry = bytearray(86)
+    struct.pack_into(">I", sample_entry, 0, 86)
+    sample_entry[4:8] = b"png "
+    struct.pack_into(">H", sample_entry, 82, 24)  # FFmpeg RGB24 depth bug
+    struct.pack_into(">h", sample_entry, 84, 0)
+
+    def _box(btype: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I4s", 8 + len(payload), btype) + payload
+
+    stsd = _box(b"stsd", struct.pack(">II", 0, 1) + bytes(sample_entry))
+    moov = _box(b"moov", _box(b"trak", _box(b"mdia", _box(b"minf", _box(b"stbl", stsd)))))
+    fake_mov = tmp_path / "synthetic_rgb24.mov"
+    fake_mov.write_bytes(_box(b"ftyp", b"qt  \x00\x00\x02\x00qt  ") + _box(b"mdat", b"\x00" * 16) + moov)
+
+    assert _ensure_mov_png_rgba_depth32(fake_mov) is True
+    assert _ensure_mov_png_rgba_depth32(fake_mov) is False  # Already 32-bit on second pass!
+    raw_after = fake_mov.read_bytes()
+    png_idx = raw_after.index(b"png ") - 4
+    assert struct.unpack_from(">H", raw_after, png_idx + 82)[0] == 32
+    assert struct.unpack_from(">h", raw_after, png_idx + 84)[0] == -1
+
+    # 3. `mediapool.import` sets `SetClipProperty("Alpha mode", "Straight")` and rejects bad values
+    fake = FakeResolve()
+    tr = DirectTransport(resolve_obj=fake)
+    imp = await tr.call(
+        "mediapool.import",
+        {"paths": [str(fake_mov)], "bin_path": "Overlays", "alpha_mode": "Straight"},
+    )
+    assert imp["alpha_mode"] == "Straight"
+    assert imp["clips"][0]["alpha_mode"] == "Straight"
+
+    with pytest.raises(OpError, match="Invalid alpha_mode"):
+        await tr.call("mediapool.import", {"paths": [str(fake_mov)], "alpha_mode": "Bogus"})
+
+    # 4. Concurrent batch pre-rendering (`_prerender_batch_overlays`) + Resolve Straight-Alpha placement
+    try:
+        find_headless_browser()
+    except RuntimeError:
+        return
+
+    await tr.call("timeline.create", {"name": "Overlay Batch Cut"})
+    await tr.call("mediapool.import", {"paths": ["base.mp4"]})
+    base_cid = (await tr.call("mediapool.clips"))["clips"][-1]["clip_id"]
+    await tr.call("timeline.append_clips", {"clips": [{"clip_id": base_cid, "start_frame": 0, "end_frame": 200, "track_index": 1}]})
+
+    batch_ops = [
+        OpCall(
+            index=0,
+            op="motion.render_overlay",
+            params={"name": "ov_one", "static": True, "width": 320, "height": 180, "record_tc": "01:00:01:00", "html": "<svg viewBox='0 0 320 180'><circle cx='90' cy='90' r='40' fill='#4cc9f0'/></svg>"},
+        ),
+        OpCall(
+            index=1,
+            op="motion.render_overlay",
+            params={"name": "ov_two", "static": True, "width": 320, "height": 180, "record_tc": "01:00:04:00", "html": "<svg viewBox='0 0 320 180'><rect x='40' y='40' width='120' height='80' fill='#f72585'/></svg>"},
+        ),
+    ]
+    sb = Sandbox(tmp_path)
+    prerendered = await _prerender_batch_overlays(batch_ops, sandbox=sb, transport=tr)
+    assert set(prerendered.keys()) == {0, 1}
+
+    outcome = await execute_batch(
+        batch_ops,
+        sandbox=sb,
+        journal=Journal(tmp_path / "journal"),
+        transport=tr,
+        cache_dir=tmp_path / "cache",
+    )
+    assert outcome.status == "ok"
+    assert outcome.results[0]["result"]["inserted_ok"] is True
+    assert outcome.results[1]["result"]["inserted_ok"] is True

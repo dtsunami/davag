@@ -98,6 +98,13 @@ async def test_web_sidecar_auth_sse_replay_grab_and_approval(
                 s_data = await r_sess.json()
                 assert s_data["resolve_connected"] is True
 
+            # Lightweight strip check (`?full=0`) skips heavy mediapool/timeline enumeration
+            async with client.get(f"{srv.url}/api/resolve?full=0", headers=headers) as r_fast:
+                assert r_fast.status == 200
+                fast_data = await r_fast.json()
+                assert fast_data["connected"] is True
+                assert "clips" not in fast_data
+
             # 2. Grab viewer frame via REST & fetch PNG bytes
             async with client.post(
                 f"{srv.url}/api/resolve/grab", headers=headers, json={"attach": True}

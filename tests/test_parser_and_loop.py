@@ -53,6 +53,28 @@ result = 1 + 1
     assert "no closing fence" in parsed.recovered
 
 
+def test_inline_glued_dr_ops_fence_recovery() -> None:
+    """Gemini 4 Carbon often glues ```dr_ops right onto the end of a prose sentence without a newline."""
+    msg = """Let's execute this clean read batch first!```dr_ops
+{"ops": [
+  {"op": "resolve.open_page", "page": "edit"},
+  {"op": "media.contact_sheet", "path": "vo_try33.mp4", "cols": 4, "rows": 4, "attach_to_context": true}
+]}
+```"""
+    parsed = extract_turn(msg)
+    assert len(parsed.ops) == 2
+    assert parsed.ops[0].op == "resolve.open_page"
+    assert parsed.ops[1].op == "media.contact_sheet"
+    assert parsed.artifacts == []
+    assert parsed.prose == "Let's execute this clean read batch first!"
+    assert parsed.recovered == "inline opening fence"
+
+    # Inline backticks mentioning `dr_ops` in prose must NOT be split into an ops block
+    prose_only = "Everything is done with no ```dr_ops``` block needed."
+    p2 = extract_turn(prose_only)
+    assert p2.ops == []
+
+
 def test_unreferenced_payload_raises_parse_error() -> None:
     bad = """```dr_ops
 {"ops": [{"op": "resolve.status"}]}
@@ -62,6 +84,45 @@ hello
 ```"""
     with pytest.raises(ParseError, match="Unreferenced payload"):
         extract_turn(bad)
+
+
+def test_tui_format_approval_body_formats_eval_python_and_multiline_payloads() -> None:
+    import io
+
+    from rich.console import Console
+
+    from davag.ui.tui import _format_approval_body
+
+    # 1. `resolve.eval` renders dedicated line-numbered Python block + single-key prompt hint
+    grp_eval = _format_approval_body(
+        {
+            "op": "resolve.eval",
+            "description": "Inspect timeline markers",
+            "code": "markers = timeline.GetMarkers()\nresult = len(markers)\n",
+        }
+    )
+    buf = io.StringIO()
+    Console(file=buf, width=100, force_terminal=False).print(grp_eval)
+    rendered = buf.getvalue()
+    assert "resolve.eval — Inspect timeline markers" in rendered
+    assert "python · live resolve / fusion" in rendered
+    assert " 1 " in rendered and "markers = timeline.GetMarkers()" in rendered
+    assert " 2 " in rendered and "result = len(markers)" in rendered
+    assert "single key — no Enter needed" in rendered
+
+    # 2. Other multi-line ops split large fields into `--davag:field--` blocks with line numbers
+    grp_other = _format_approval_body(
+        {
+            "op": "custom.gated",
+            "html": "<div>\n  <span>hello</span>\n</div>\n",
+        }
+    )
+    buf2 = io.StringIO()
+    Console(file=buf2, width=100, force_terminal=False).print(grp_other)
+    rendered2 = buf2.getvalue()
+    assert '"html": "@html"' in rendered2
+    assert "--davag:html--" in rendered2
+    assert "--davag:end--" in rendered2
 
 
 def test_cost_math_and_key_masking() -> None:

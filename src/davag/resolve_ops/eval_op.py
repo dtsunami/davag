@@ -16,7 +16,7 @@ from .schema import OpContext, OpError, resolve_op
     checkpoint_timeline=True,
     summary="Execute custom Python code against live (resolve, fusion, bmd, project, mediapool, timeline).",
     params_doc={
-        "code": "Python source code (assign to `result` or `print(...)` to return data)",
+        "code": "Python source code — ALWAYS pass via `@NAME` (`--davag:NAME--` payload block) when multi-line; assign to `result` or `print(...)`",
         "description": "Short human-readable explanation shown in the approval prompt",
     },
 )

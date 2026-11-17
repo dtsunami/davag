@@ -13,7 +13,7 @@ def _serialize_clip(clip: Any, bin_path: str) -> dict[str, Any]:
     frames_str = str(props.get("Frames", "0") or "0")
     frames = int(frames_str) if frames_str.isdigit() else 0
     markers = safe_call(clip, "GetMarkers", default={})
-    return {
+    out = {
         "clip_id": str(safe_call(clip, "GetUniqueId", default="")),
         "name": str(safe_call(clip, "GetName", default=props.get("Clip Name", ""))),
         "bin_path": bin_path,
@@ -27,6 +27,10 @@ def _serialize_clip(clip: Any, bin_path: str) -> dict[str, Any]:
         "clip_color": str(safe_call(clip, "GetClipColor", default="")),
         "markers_count": len(markers) if isinstance(markers, dict) else 0,
     }
+    alpha_val = str(props.get("Alpha mode", "")).strip()
+    if alpha_val:
+        out["alpha_mode"] = alpha_val
+    return out
 
 
 def _folder_tree(folder: Any, prefix: str = "") -> dict[str, Any]:
@@ -153,16 +157,33 @@ def op_mediapool_create_bin(ctx: OpContext, params: dict[str, Any]) -> dict[str,
 @resolve_op(
     "mediapool.import",
     tier="mutate",
-    summary="Import media files from disk into a Media Pool bin.",
+    summary="Import media files from disk into a Media Pool bin (with optional Straight/Premultiplied alpha_mode).",
     params_doc={
         "paths": "List of file or directory paths on disk",
         "bin_path": "Optional target bin path (created automatically if missing)",
+        "alpha_mode": "Optional alpha channel mode ('Straight', 'Premultiplied', or 'None') applied via SetClipProperty",
     },
 )
 def op_mediapool_import(ctx: OpContext, params: dict[str, Any]) -> dict[str, Any]:
     raw_paths = params.get("paths")
     if not isinstance(raw_paths, list) or not raw_paths:
         raise OpError("mediapool.import requires non-empty list 'paths'", code="MISSING_PARAM")
+
+    raw_alpha = str(params.get("alpha_mode", "")).strip()
+    norm_alpha = ""
+    if raw_alpha:
+        alpha_map = {
+            "straight": "Straight",
+            "premultiplied": "Premultiplied",
+            "none": "None",
+            "ignore": "None",
+        }
+        norm_alpha = alpha_map.get(raw_alpha.lower(), "")
+        if not norm_alpha:
+            raise OpError(
+                f"Invalid alpha_mode '{raw_alpha}' (expected 'Straight', 'Premultiplied', or 'None')",
+                code="INVALID_PARAM",
+            )
 
     mp = ctx.media_pool
     bin_path = str(params.get("bin_path", "")).strip()
@@ -174,9 +195,14 @@ def op_mediapool_import(ctx: OpContext, params: dict[str, Any]) -> dict[str, Any
 
     folder_label = bin_path or str(safe_call(folder, "GetName", default="Master"))
     imported = lua_list(mp.ImportMedia([str(p) for p in raw_paths]))
+    if norm_alpha:
+        for c in imported:
+            safe_call(c, "SetClipProperty", "Alpha mode", norm_alpha)
+
     return {
         "imported_count": len(imported),
         "bin_path": folder_label,
+        **({"alpha_mode": norm_alpha} if norm_alpha else {}),
         "clips": [_serialize_clip(c, folder_label) for c in imported],
     }
 

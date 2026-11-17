@@ -42,7 +42,7 @@ OPTIONS
       --open                 open the tokenized Web GUI URL in your browser on launch (implies --web)
       --port <n>             port for --web (implies --web; 0 picks a free port)
       --host <addr>          bind address for --web (implies --web; refuses --yolo off-loopback)
-      --doctor               inspect DaVinci Resolve paths, FFmpeg, and API keys
+      --doctor               inspect DaVinci Resolve paths, FFmpeg, motion backends, and API keys
       --install-bridge       install davag_bridge.py into Resolve's Workspace -> Scripts menu
       --models [provider]    list models the provider serves
       --sessions             list recent sessions
@@ -234,9 +234,11 @@ def _print_doctor(cfg) -> int:
     import asyncio
 
     from .media_intel.hwaccel import detect_gpu_capabilities
+    from .media_intel.motion import probe_motion_capabilities
 
     inst = discover_resolve()
     gpu = detect_gpu_capabilities(inst.ffmpeg_path)
+    motion = probe_motion_capabilities()
     bridge_script = Path(inst.user_scripts_utility_dir) / "davag_bridge.py"
     live = asyncio.run(_probe_live_resolve(cfg)) if inst.resolve_running else {"connected": False}
 
@@ -244,6 +246,11 @@ def _print_doctor(cfg) -> int:
     qsv_str = f"Intel QSV ({', '.join(gpu.qsv_encoders)})" if gpu.qsv_encoders else ""
     nvenc_str = f"NVENC ({', '.join(gpu.nvenc_encoders)})" if gpu.nvenc_encoders else ""
     hw_encoders = " · ".join(x for x in (qsv_str, nvenc_str) if x) or "software only"
+    cdp_label = (
+        f"ready ({motion['browser_path']}, warm daemon + <4ms auto_clip)"
+        if motion["cdp_ready"]
+        else "missing (install Chrome or Microsoft Edge)"
+    )
 
     lines = [
         f"davag {__version__} — environment & DaVinci Resolve check",
@@ -254,6 +261,13 @@ def _print_doctor(cfg) -> int:
         f"  hw media encoders   {hw_encoders} (preferred proxy: {gpu.preferred_proxy_encoder})",
         f"  ffmpeg              {inst.ffmpeg_path or 'missing (install ffmpeg for proxy video & silence detection)'}",
         f"  ffprobe             {inst.ffprobe_path or 'missing'}",
+        "",
+        "Motion Overlay Engine",
+        f"  svg fast path       {motion['svg_status']}",
+        f"  canvas fast path    {motion['canvas_status']}",
+        f"  html/css cdp pool   {cdp_label}",
+        f"  node runtime        {motion['node_path'] or 'not found'}",
+        f"  alpha codecs        {', '.join(motion['codecs']) if inst.ffmpeg_path else 'requires ffmpeg'}",
         "",
         "DaVinci Resolve",
         f"  resolve executable  {inst.resolve_exe_path or 'not found in default path'}",

@@ -15,6 +15,7 @@ import html
 import io
 import json
 import shutil
+import textwrap
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -23,13 +24,135 @@ from typing import Any
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.history import History
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.shortcuts import print_formatted_text
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.text import Text
+
+_APPROVAL_FOOTER = (
+    "Press [bold green]y[/] allow · [bold cyan]c[/] checkpoint timeline & allow · "
+    "[bold red]n[/] deny  [dim](single key — no Enter needed)[/]"
+)
+
+
+def _format_approval_body(op_dict: dict[str, Any]) -> Group:
+    """Format gated ops cleanly — dedicated line-numbered Python view for `resolve.eval`, bash for `shell`."""
+    op_name = str(op_dict.get("op", ""))
+    parts: list[Any] = []
+
+    if op_name == "resolve.eval":
+        header = Text()
+        header.append("resolve.eval", style="bold bright_cyan")
+        desc = str(op_dict.get("description") or "").strip()
+        if desc:
+            header.append(f" — {desc}", style="bold bright_white")
+        parts.append(header)
+
+        extra = {k: v for k, v in op_dict.items() if k not in ("op", "code", "description")}
+        if extra:
+            parts.append(
+                Syntax(
+                    json.dumps(extra, ensure_ascii=False),
+                    "json",
+                    theme="monokai",
+                    background_color="default",
+                    word_wrap=True,
+                )
+            )
+
+        raw_code = str(op_dict.get("code") or "")
+        clean_code = textwrap.dedent(raw_code).strip("\n") or "# (empty)"
+        parts.append(
+            Panel(
+                Syntax(
+                    clean_code,
+                    "python",
+                    theme="monokai",
+                    background_color="default",
+                    line_numbers=True,
+                    word_wrap=True,
+                    indent_guides=True,
+                    padding=(0, 1),
+                ),
+                title="[dim cyan]python · live resolve / fusion[/]",
+                title_align="left",
+                border_style="bright_black",
+                padding=(0, 0),
+            )
+        )
+        parts.append(Text.from_markup(_APPROVAL_FOOTER))
+        return Group(*parts)
+
+    if op_name == "shell":
+        header = Text()
+        header.append("shell", style="bold bright_cyan")
+        if op_dict.get("cwd"):
+            header.append(f"  (cwd: {op_dict['cwd']})", style="dim")
+        parts.append(header)
+        clean_cmd = textwrap.dedent(str(op_dict.get("cmd") or "")).strip("\n")
+        parts.append(
+            Panel(
+                Syntax(
+                    clean_cmd,
+                    "bash",
+                    theme="monokai",
+                    background_color="default",
+                    line_numbers=True,
+                    word_wrap=True,
+                    padding=(0, 1),
+                ),
+                title="[dim cyan]command[/]",
+                title_align="left",
+                border_style="bright_black",
+                padding=(0, 0),
+            )
+        )
+        parts.append(Text.from_markup(_APPROVAL_FOOTER))
+        return Group(*parts)
+
+    envelope: dict[str, Any] = {}
+    payload_blocks: list[tuple[str, str]] = []
+    for k, v in op_dict.items():
+        if isinstance(v, str) and ("\n" in v or (k in ("code", "cmd", "html", "text") and len(v) > 96)):
+            envelope[k] = f"@{k}"
+            payload_blocks.append((k, v))
+        else:
+            envelope[k] = v
+
+    parts.append(
+        Syntax(
+            json.dumps(envelope, indent=2, ensure_ascii=False),
+            "json",
+            theme="monokai",
+            background_color="default",
+            word_wrap=True,
+        )
+    )
+
+    for field_name, raw_body in payload_blocks:
+        lexer = "python" if field_name == "code" else ("bash" if field_name == "cmd" else ("html" if field_name == "html" else "text"))
+        clean_body = textwrap.dedent(raw_body).strip("\n")
+        parts.append(Text(f"--davag:{field_name}--", style="bold cyan"))
+        parts.append(
+            Syntax(
+                clean_body,
+                lexer,
+                theme="monokai",
+                background_color="default",
+                word_wrap=True,
+                line_numbers=True,
+            )
+        )
+        parts.append(Text("--davag:end--", style="bold cyan"))
+
+    parts.append(Text(""))
+    parts.append(Text.from_markup(_APPROVAL_FOOTER))
+    return Group(*parts)
 
 from davag import __version__
 from davag.context.utf8 import sanitize_utf8_str
@@ -232,8 +355,14 @@ async def run_tui_loop(
             pending_approvals[:] = [p for p in pending_approvals if p.get("id") != ap_id]
             if len(pending_approvals) < before:
                 dec = ev["data"].get("decision") or {}
-                verdict = "allowed" if dec.get("allow") else "denied"
-                _pt_print(f"[dim]  ✓ approval {ap_id} {verdict}[/]")
+                allow = bool(dec.get("allow"))
+                verdict = "allowed" if allow else "denied"
+                _pt_print(f"[dim]  ✓ approval {ap_id} {verdict} (web)[/]")
+                _set_activity(
+                    "waiting for approval [y/c/n]…"
+                    if pending_approvals
+                    else ("running approved op…" if allow else "processing denial…")
+                )
 
     session.bus.subscribe(_on_bus_event)
 
@@ -302,10 +431,9 @@ async def run_tui_loop(
     def _on_approval_request(req: dict[str, Any]) -> None:
         pending_approvals.append(req)
         _set_activity("waiting for approval [y/c/n]…")
-        op_json = json.dumps(req["op"], indent=2, ensure_ascii=False)
         _pt_print(
             Panel(
-                f"{op_json}\n\n[bold yellow]Type `y` to allow, `c` to checkpoint timeline & allow, or `n` to deny[/]",
+                _format_approval_body(req["op"]),
                 title=f"▲ Approval Needed ({req.get('id', 'ap')})",
                 border_style="yellow",
             )
@@ -477,6 +605,40 @@ async def run_tui_loop(
         refresh_interval=0.12,
     )
 
+    def _resolve_next_approval(choice: str) -> None:
+        if not pending_approvals:
+            return
+        ap = pending_approvals.pop(0)
+        ap_id = ap.get("id")
+        label = ap_id or "ap"
+        allow = choice in ("y", "yes", "c", "checkpoint")
+        cp_first = choice in ("c", "checkpoint")
+        if cp_first:
+            _pt_print(f"[cyan]  ✓ approval {label}: checkpointing timeline & allowing[/]")
+        elif allow:
+            _pt_print(f"[green]  ✓ approval {label}: allowed[/]")
+        else:
+            _pt_print(f"[red]  ✗ approval {label}: denied[/]")
+        _set_activity(
+            "waiting for approval [y/c/n]…"
+            if pending_approvals
+            else ("running approved op…" if allow else "processing denial…")
+        )
+        if ap_id:
+            session.bus.resolve_approval(ap_id, {"allow": allow, "checkpoint_first": cp_first})
+        else:
+            ap["respond"]({"allow": allow, "checkpoint_first": cp_first})
+
+    _approval_hotkey = Condition(
+        lambda: bool(pending_approvals) and not prompt_session.default_buffer.text
+    )
+    for _key_ch in ("y", "Y", "c", "C", "n", "N"):
+
+        @kb.add(_key_ch, filter=_approval_hotkey)
+        def _on_instant_approval(event: Any, ch: str = _key_ch.lower()) -> None:
+            _resolve_next_approval(ch)
+            event.app.invalidate()
+
     # Never let prompt_toolkit's default `Application._handle_exception` freeze the CLI/Web event loop
     # with `Press ENTER to continue...` when a browser aborts a TCP socket or a background callback errs!
     def _nonblocking_loop_exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
@@ -535,14 +697,7 @@ async def run_tui_loop(
             continue
 
         if pending_approvals and trimmed.lower() in ("y", "yes", "n", "no", "c", "checkpoint"):
-            ap = pending_approvals.pop(0)
-            ap_id = ap.get("id")
-            allow = trimmed.lower() in ("y", "yes", "c", "checkpoint")
-            cp_first = trimmed.lower() in ("c", "checkpoint")
-            if ap_id:
-                session.bus.resolve_approval(ap_id, {"allow": allow, "checkpoint_first": cp_first})
-            else:
-                ap["respond"]({"allow": allow, "checkpoint_first": cp_first})
+            _resolve_next_approval(trimmed.lower())
             continue
 
         if line.count("\n") >= 4:

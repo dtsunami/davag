@@ -2,5 +2,8 @@
 # so `davag` stays focused on media/editorial files rather than reading its own source code!
 tests/
 src/
+node_modules/
 pyproject.toml
+package.json
+package-lock.json
 plan.md

@@ -64,8 +64,8 @@ def _build_protocol_default(role: str = "master") -> str:
         ("media.proxy_clip", "read", "`clip_id` or `path`, `start_sec`?, `duration_sec`?, `height`?, `fps`?, `prefer_av1`?, `attach_to_context`?", "Intel Arc QSV / NVENC 480p review MP4 attached for Gemini native video inspection"),
         ("media.generate_resolve_proxy", "mutate", "`clip_id` or `path`, `height`?, `video_kbps`?, `link_in_resolve`?", "Generate smooth-scrubbing short-GOP QSV proxy & auto-link onto Resolve `MediaPoolItem`"),
         ("media.save_digest", "mutate", "`clip_id` or `path`, `summary`, `scenes`?", "Save/update persistent Clip Digest in `~/.davag/cache/digests/` for future sessions"),
-        ("motion.render_overlay", "mutate", "`name`, `html` (use `@payload`!) or `path`, `duration_sec`?, `static`?, `codec`? ('png'|'prores'), `record_tc`?, `track_index`?", "**Deterministic JS/CSS/SVG/Canvas Motion Overlay:** renders lightweight transparent QuickTime PNG `.mov` (or `codec: 'prores'` 10-bit ProRes 4444) via headless browser CDP (`window.renderFrame(f, t, dur, fps)`), imports to `Overlays` bin, & places on an unobstructed Overlay track at `record_tc`!"),
-        ("motion.qr_callout", "mutate", "`title`, `url`, `record_tc`?, `duration_sec`? (6.5), `position`? ('bottom-right'), `codec`? ('png'|'prores'), `add_marker`? (true)", "**In-Video Scannable QR + URL Callout:** generates vector ISO QR code card, renders transparent QuickTime PNG `.mov` onto Overlay track at `record_tc`, & drops a `Purple` Link Marker so `youtube.stage` auto-populates Description & Comment links!"),
+        ("motion.render_overlay", "mutate", "`name`, `html` (ALWAYS `@payload`!) or `path`, `duration_sec`?, `static`?, `codec`? ('png'|'qtrle'|'prores'), `backend`? ('auto'|'native'|'cdp'), `record_tc`?, `track_index`?", "**Dual-Path Deterministic Motion Overlay:** renders Straight-Alpha `.mov` (`png` depth=32, `qtrle`, or `prores` 4444) via native V8+`resvg-py`/`@napi-rs/canvas` or warm parallel CDP + dynamic `auto_clip` (`window.renderFrame(f, t, dur, fps)`), imports to `Overlays` bin (`alpha_mode: 'Straight'`), & places on an unobstructed Overlay track at `record_tc`!"),
+        ("motion.qr_callout", "mutate", "`title`, `url`, `record_tc`?, `duration_sec`? (6.5), `position`? ('bottom-right'), `codec`? ('png'|'qtrle'|'prores'), `backend`? ('auto'|'native'|'cdp'), `add_marker`? (true)", "**In-Video Scannable QR + URL Callout:** generates vector ISO QR code card, renders Straight-Alpha `.mov` onto Overlay track at `record_tc`, & drops a `Purple` Link Marker so `youtube.stage` auto-populates Description & Comment links!"),
         ("youtube.thumbnail", "mutate", "`prompt`, `reference_images`? (e.g. `[\"grab_current\"]` or paths), `grab_tc`?, `model`?, `output_path`?", "**OpenRouter Multimodal Thumbnail Generator (Flux 3 / Flux 2 Pro):** generates 16:9 PNG thumbnail from prompt + reference frames & attaches for review"),
         ("youtube.stage", "mutate", "`title`, `description`?, `primary_url`?, `first_comment`?, `tags`?, `privacy_status`? ('private'|'unlisted'), `thumbnail_path`?, `render_qr_markers`? (true), `append_end_screen`? (true), `end_screen_sec`? (8.0), `queue_render`?", "**Resolve-to-YouTube Compiler:** compiles `Cyan` markers -> Chapters, `Purple` markers -> QR overlays + Line-1/Timestamped Description links + `COMMENT.md`, appends 8s card-ready dimmed End-Screen slate on `Video 1`, & queues Deliver render"),
         ("youtube.upload", "eval", "`manifest_path`", "Upload staged `youtube_manifest.json` bundle (MP4 + thumbnail + `.srt` captions + auto first-comment when `unlisted`/`public`) to YouTube Data API v3"),
@@ -101,11 +101,12 @@ Emit at most ONE `dr_ops` block per turn:
 ]}}
 ```
 
-Any string value may instead be `"@NAME"`, pulling in a verbatim `--davag:NAME--` payload block (used for multi-line HTML/SVG/JS `motion.render_overlay` overlays, `resolve.eval` Python scripts, `media.save_digest` summaries, or `fs.write`/`fs.replace` content):
+**ALWAYS use `"@NAME"` (`--davag:NAME-- ... --davag:end--`) payload blocks for ANY multi-line string** — especially `motion.render_overlay` `html` (HTML/CSS/SVG/JS), `resolve.eval` `code` (Python scripts), `media.save_digest` `summary`, and `fs.write`/`fs.replace` text. Never cram multi-line scripts or markup into `\n`-escaped inline JSON strings:
 
 ```dr_ops
 {{"ops": [
-  {{"op": "motion.render_overlay", "name": "burn_meter", "duration_sec": 3.5, "record_tc": "01:02:33:05", "html": "@1"}}
+  {{"op": "motion.render_overlay", "name": "burn_meter", "duration_sec": 3.5, "record_tc": "01:02:33:05", "html": "@1"}},
+  {{"op": "resolve.eval", "description": "Inspect timeline render settings", "code": "@py"}}
 ]}}
 --davag:1--
 <div id="card" style="position:absolute;bottom:90px;left:90px;padding:24px 36px;background:rgba(15,20,32,0.92);border-left:6px solid #ff4d4f;border-radius:12px;color:#fff;">
@@ -118,6 +119,10 @@ Any string value may instead be `"@NAME"`, pulling in a verbatim `--davag:NAME--
     document.getElementById('val').textContent = `${{Math.round(p * 64000).toLocaleString()}} / 64,000 tok`;
   }};
 </script>
+--davag:end--
+--davag:py--
+settings = project.GetRenderSettings()
+result = {{"format": project.GetCurrentRenderFormatAndCodec()}}
 --davag:end--
 ```
 

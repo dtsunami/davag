@@ -11,11 +11,11 @@ Modeled directly on `davai/src/agent/loop.js`:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
 import json
 import re
 import time
 from collections.abc import Callable
+from dataclasses import asdict
 from typing import Any
 
 from davag.config.env import Config
@@ -515,8 +515,10 @@ class Agent(EventEmitter):
                 if extracted.recovered:
                     self.emit("warning", {"message": f"Recovered dr_ops block ({extracted.recovered})"})
 
-                # Record non-op code blocks as saveable Artifacts
+                # Record non-empty non-op code blocks as saveable Artifacts
                 for art_blk in extracted.artifacts:
+                    if not art_blk.body.strip():
+                        continue
                     art = self.artifacts.add(
                         lang=art_blk.lang, body=art_blk.body, turn=self.stats["turns"]
                     )

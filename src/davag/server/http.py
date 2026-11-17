@@ -251,6 +251,7 @@ async def start_web_server(
         lan_ip = _detect_lan_ipv4()
         if lan_ip:
             lan_auth_url = f"http://{lan_ip}:{actual_port}/?token={q_tok}"
+    state.lan_auth_url = lan_auth_url
 
     return RunningWebServer(
         host=host,

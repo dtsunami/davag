@@ -19,6 +19,7 @@ class WebState:
     session: Session
     submit_fn: Callable[[str, str], Any]
     secret: str
+    lan_auth_url: str | None = None
     bg_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     sse_queues: set[asyncio.Queue[dict[str, Any] | None]] = field(default_factory=set)
     shutdown_ev: asyncio.Event = field(default_factory=asyncio.Event)
@@ -41,6 +42,7 @@ class WebState:
             "yolo": cfg.yolo,
             "resolve_connected": self.session.transport is not None,
             "resolve_mode": self.session.transport.mode if self.session.transport else None,
+            "lan_auth_url": self.lan_auth_url,
             "stats": dict(self.session.agent.stats),
             "context": {
                 "tokens": self.session.ledger.total_tokens,

@@ -188,11 +188,19 @@ def plan_batch(
                 elif call.op == "motion.qr_callout":
                     if not p.get("url"):
                         errors.append({"index": call.index, "op": call.op, "message": "motion.qr_callout requires 'url'"})
+                    elif p.get("codec") and str(p["codec"]).strip().lower() not in ("png", "qtrle", "prores", "prores_4444"):
+                        errors.append({"index": call.index, "op": call.op, "message": f"unsupported codec '{p['codec']}' (expected 'png', 'qtrle', or 'prores')"})
+                    elif p.get("backend") and str(p["backend"]).strip().lower() not in ("auto", "native", "cdp"):
+                        errors.append({"index": call.index, "op": call.op, "message": f"unsupported backend '{p['backend']}' (expected 'auto', 'native', or 'cdp')"})
                 elif call.op == "motion.render_overlay":
                     if not p.get("html") and not p.get("path"):
                         errors.append(
                             {"index": call.index, "op": call.op, "message": "motion.render_overlay requires 'html' (or 'path')"}
                         )
+                    elif p.get("codec") and str(p["codec"]).strip().lower() not in ("png", "qtrle", "prores", "prores_4444"):
+                        errors.append({"index": call.index, "op": call.op, "message": f"unsupported codec '{p['codec']}' (expected 'png', 'qtrle', or 'prores')"})
+                    elif p.get("backend") and str(p["backend"]).strip().lower() not in ("auto", "native", "cdp"):
+                        errors.append({"index": call.index, "op": call.op, "message": f"unsupported backend '{p['backend']}' (expected 'auto', 'native', or 'cdp')"})
                 elif call.op == "youtube.thumbnail":
                     if not p.get("prompt"):
                         errors.append({"index": call.index, "op": call.op, "message": "youtube.thumbnail requires 'prompt'"})
@@ -358,6 +366,88 @@ def _exec_fs_op(call: OpCall, sandbox: Sandbox, journal: Journal) -> tuple[FileE
     raise ValueError(f"Unhandled fs op: {call.op}")
 
 
+async def _prerender_batch_overlays(
+    ops: list[OpCall],
+    *,
+    sandbox: Sandbox,
+    transport: ResolveTransport | None,
+    max_concurrency: int = 3,
+) -> dict[int, dict[str, Any]]:
+    """Pre-render multiple `motion.render_overlay` / `motion.qr_callout` ops concurrently before Resolve import."""
+    overlay_calls = [c for c in ops if c.op in ("motion.render_overlay", "motion.qr_callout")]
+    if len(overlay_calls) < 2:
+        return {}
+
+    from davag.media_intel.motion import render_html_svg_overlay
+    from davag.youtube.qr import build_qr_callout_html
+
+    proj_w, proj_h, proj_fps = 1920, 1080, 30.0
+    if transport is not None:
+        with contextlib.suppress(Exception):
+            st = await transport.call("resolve.status", timeout=2.0)
+            proj = st.get("project") or {}
+            if proj.get("width"):
+                proj_w = int(proj["width"])
+                proj_h = int(proj["height"])
+            if proj.get("fps"):
+                proj_fps = float(proj["fps"])
+
+    sem = asyncio.Semaphore(max_concurrency)
+    prerendered: dict[int, dict[str, Any]] = {}
+
+    async def _render_one(call: OpCall) -> None:
+        p = call.params
+        if call.op == "motion.qr_callout":
+            title_txt = str(p.get("title") or "Explore the Code & Demo")
+            url_txt = str(p["url"]).strip()
+            html_src = build_qr_callout_html(
+                title=title_txt,
+                url=url_txt,
+                kicker=str(p.get("kicker") or "SCAN OR CLICK LINK IN DESCRIPTION"),
+                position=str(p.get("position") or "bottom-right"),
+                accent=str(p.get("accent") or "#4cc9f0"),
+            )
+            raw_name = p.get("name") or f"qr_{re.sub(r'[^a-zA-Z0-9]+', '_', title_txt).strip('_').lower()[:28]}"
+            dur_sec = float(p.get("duration_sec", 6.5))
+        else:
+            html_src = (
+                str(p["html"])
+                if p.get("html")
+                else sandbox.resolve_for_read(str(p["path"])).read_text(encoding="utf-8")
+            )
+            raw_name = p.get("name") or "overlay"
+            dur_sec = float(p.get("duration_sec", 4.0))
+
+        name_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(raw_name)).strip("_") or "overlay"
+        out_default = sandbox.cwd / "overlays" / f"{name_slug}.mov"
+        out_p = sandbox.resolve_for_write(str(p["output_path"])) if p.get("output_path") else out_default
+        width = int(p.get("width", proj_w))
+        height = int(p.get("height", proj_h))
+        fps = float(p.get("fps", proj_fps))
+
+        with contextlib.suppress(OSError):
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            out_p.with_suffix(".html").write_text(html_src, encoding="utf-8")
+
+        async with sem:
+            with contextlib.suppress(Exception):
+                prerendered[call.index] = await render_html_svg_overlay(
+                    html_or_svg=html_src,
+                    output_path=out_p,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    duration_sec=dur_sec,
+                    static=bool(p.get("static", False)),
+                    codec=str(p.get("codec", "png")),
+                    backend=str(p.get("backend", "auto")),
+                    auto_clip=bool(p.get("auto_clip", True)),
+                )
+
+    await asyncio.gather(*[_render_one(c) for c in overlay_calls])
+    return prerendered
+
+
 async def _exec_media_op(
     call: OpCall,
     sandbox: Sandbox,
@@ -368,6 +458,7 @@ async def _exec_media_op(
     transport: ResolveTransport | None,
     clip_map: dict[str, dict[str, Any]],
     allowed_media: set[Path],
+    prerendered_overlay: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     p = call.params
     loop = asyncio.get_running_loop()
@@ -442,6 +533,8 @@ async def _exec_media_op(
                 "duration_sec": float(p.get("duration_sec", 6.5)),
                 "static": bool(p.get("static", False)),
                 **({"codec": p["codec"]} if p.get("codec") else {}),
+                **({"backend": p["backend"]} if p.get("backend") else {}),
+                **({"auto_clip": p["auto_clip"]} if "auto_clip" in p else {}),
                 **({"record_tc": p["record_tc"]} if p.get("record_tc") else {}),
                 **({"track_index": p["track_index"]} if p.get("track_index") is not None else {}),
                 **({"output_path": p["output_path"]} if p.get("output_path") else {}),
@@ -456,50 +549,61 @@ async def _exec_media_op(
             transport=transport,
             clip_map=clip_map,
             allowed_media=allowed_media,
+            prerendered_overlay=prerendered_overlay,
         )
 
     if call.op == "motion.render_overlay":
         from davag.media_intel.motion import render_html_svg_overlay
 
-        html_src = str(p["html"]) if p.get("html") else sandbox.resolve_for_read(str(p["path"])).read_text(encoding="utf-8")
-        name_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(p.get("name") or "overlay")).strip("_") or "overlay"
-        out_default = sandbox.cwd / "overlays" / f"{name_slug}.mov"
-        out_p = sandbox.resolve_for_write(str(p["output_path"])) if p.get("output_path") else out_default
-
-        # Match open Resolve project FPS/resolution automatically unless overridden!
         width = int(p.get("width", 1920))
         height = int(p.get("height", 1080))
         fps = float(p.get("fps", 30.0))
-        if transport is not None and ("width" not in p or "fps" not in p):
-            with contextlib.suppress(Exception):
-                st = await transport.call("resolve.status", timeout=2.0)
-                proj = st.get("project") or {}
-                if "width" not in p and proj.get("width"):
-                    width = int(proj["width"])
-                    height = int(proj["height"])
-                if "fps" not in p and proj.get("fps"):
-                    fps = float(proj["fps"])
 
-        with contextlib.suppress(OSError):
-            out_p.parent.mkdir(parents=True, exist_ok=True)
-            out_p.with_suffix(".html").write_text(html_src, encoding="utf-8")
+        if prerendered_overlay is not None:
+            res = dict(prerendered_overlay)
+            fps = float(res.get("fps") or fps)
+        else:
+            html_src = str(p["html"]) if p.get("html") else sandbox.resolve_for_read(str(p["path"])).read_text(encoding="utf-8")
+            name_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(p.get("name") or "overlay")).strip("_") or "overlay"
+            out_default = sandbox.cwd / "overlays" / f"{name_slug}.mov"
+            out_p = sandbox.resolve_for_write(str(p["output_path"])) if p.get("output_path") else out_default
 
-        res = await render_html_svg_overlay(
-            html_or_svg=html_src,
-            output_path=out_p,
-            width=width,
-            height=height,
-            fps=fps,
-            duration_sec=float(p.get("duration_sec", 4.0)),
-            static=bool(p.get("static", False)),
-            codec=str(p.get("codec", "png")),
-        )
+            # Match open Resolve project FPS/resolution automatically unless overridden!
+            if transport is not None and ("width" not in p or "fps" not in p):
+                with contextlib.suppress(Exception):
+                    st = await transport.call("resolve.status", timeout=2.0)
+                    proj = st.get("project") or {}
+                    if "width" not in p and proj.get("width"):
+                        width = int(proj["width"])
+                        height = int(proj["height"])
+                    if "fps" not in p and proj.get("fps"):
+                        fps = float(proj["fps"])
+
+            with contextlib.suppress(OSError):
+                out_p.parent.mkdir(parents=True, exist_ok=True)
+                out_p.with_suffix(".html").write_text(html_src, encoding="utf-8")
+
+            res = await render_html_svg_overlay(
+                html_or_svg=html_src,
+                output_path=out_p,
+                width=width,
+                height=height,
+                fps=fps,
+                duration_sec=float(p.get("duration_sec", 4.0)),
+                static=bool(p.get("static", False)),
+                codec=str(p.get("codec", "png")),
+                backend=str(p.get("backend", "auto")),
+                auto_clip=bool(p.get("auto_clip", True)),
+            )
 
         # Optionally import into Resolve `Overlays` bin & place onto an unobstructed Overlay Video track!
         if transport is not None and (p.get("record_tc") or p.get("insert_on_timeline")):
             from davag.resolve_ops.helpers import tc_to_frames
 
-            imp = await transport.call("mediapool.import", {"paths": [res["path"]], "bin_path": "Overlays"})
+            imp = await transport.call(
+                "mediapool.import",
+                {"paths": [res["path"]], "bin_path": "Overlays", "alpha_mode": "Straight"},
+            )
             imp_clips = imp.get("clips") or []
             if imp_clips:
                 ov_cid = imp_clips[0]["clip_id"]
@@ -902,6 +1006,10 @@ async def execute_batch(
         with contextlib.suppress(Exception):
             checkpoint = await journal.create_resolve_checkpoint(transport)
 
+    prerendered_overlays = await _prerender_batch_overlays(
+        pass1_ops, sandbox=sandbox, transport=transport
+    )
+
     # --- Pass 1: Read, Media, FS, and standard Resolve mutations ---
     for call in ops:
         if _is_gated_op(call):
@@ -927,6 +1035,7 @@ async def execute_batch(
                     transport=transport,
                     clip_map=clip_map,
                     allowed_media=allowed_media,
+                    prerendered_overlay=prerendered_overlays.get(call.index),
                 )
                 if call.op == "media.proxy_clip" and res.get("attach_to_context"):
                     attached_media.append({"kind": "video", "path": res["path"]})

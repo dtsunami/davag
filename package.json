@@ -1,0 +1,8 @@
+{
+  "name": "davag-motion",
+  "version": "0.1.0",
+  "description": "Node.js V8 + @napi-rs/canvas runtime for davag motion overlays",
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.68"
+  }
+}

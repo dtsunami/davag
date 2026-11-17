@@ -94,9 +94,16 @@ body { margin: 0; background: var(--bg); color: var(--text); height: 100vh; over
 }
 
 .approval-box { margin: 0 18px 8px; padding: 12px; background: #241715; border: 1px solid var(--accent); border-radius: 7px; }
-.approval-title { font-weight: bold; color: var(--accent); margin-bottom: 6px; }
-.ap-code { background: #090c11; padding: 8px; border-radius: 5px; border: 1px solid var(--border); overflow-x: auto; margin: 6px 0; max-height: 220px; }
-.approval-actions { display: flex; gap: 8px; }
+.approval-title { font-weight: bold; color: var(--accent); margin-bottom: 4px; }
+.ap-desc { font-size: 13px; color: #e2e8f0; margin-bottom: 6px; }
+.ap-code { background: #090c11; padding: 8px 10px; border-radius: 5px; border: 1px solid var(--border); overflow-x: auto; margin: 6px 0; max-height: 280px; font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-size: 12.5px; line-height: 1.48; }
+.ap-ln { display: inline-block; min-width: 2.4em; padding-right: 0.9em; margin-right: 0.7em; text-align: right; color: #64748b; border-right: 1px solid #1e293b; user-select: none; }
+.ap-kw { color: #ff79c6; font-weight: 600; }
+.ap-str { color: #e6db74; }
+.ap-cmt { color: #64748b; font-style: italic; }
+.ap-num { color: #bd93f9; }
+.ap-fn { color: #66d9ef; }
+.approval-actions { display: flex; gap: 8px; align-items: center; }
 
 .composer { display: flex; gap: 8px; padding: 10px 14px; background: var(--panel); border-top: 1px solid var(--border); position: relative; }
 .composer textarea { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font: inherit; resize: none; }

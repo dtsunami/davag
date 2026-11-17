@@ -17,25 +17,43 @@ router = APIRouter()
 
 
 @router.get("/api/resolve")
-async def api_resolve_state(st: StateDep) -> dict[str, Any]:
+async def api_resolve_state(req: Request, st: StateDep) -> dict[str, Any]:
     from davag.media_intel.digest import _digest_key, load_clip_digest
     from davag.media_intel.transcribe import load_cached_transcript
 
+    full = str(req.query_params.get("full", "1")).lower() not in ("0", "false", "no")
     session = st.session
+    if session.transport is None:
+        await session.maybe_auto_connect_resolve()
     if session.transport is None:
         return {"connected": False, "note": session.resolve_connect_note}
     try:
-        status = await session.transport.call("resolve.status", timeout=4.0)
+        status = await session.transport.call("resolve.status", timeout=8.0)
+        if not full:
+            return {
+                "connected": True,
+                "status": status,
+                "checkpoints": [
+                    {
+                        "seq": c.seq,
+                        "original_name": c.original_name,
+                        "snapshot_name": c.snapshot_name,
+                        "ts": c.ts,
+                    }
+                    for c in session.journal.resolve_checkpoints
+                ],
+            }
+
         tree = None
         clips_list = []
         tl_state = None
         if status.get("project"):
-            tree = await session.transport.call("mediapool.tree", timeout=4.0)
+            tree = await session.transport.call("mediapool.tree", timeout=10.0)
             cache_root = session.cfg.home / "cache"
             proxy_cache_dir = cache_root / "resolve_proxies"
             sheet_cache_dir = cache_root / "contact_sheets"
 
-            c_res = await session.transport.call("mediapool.clips", {"recursive": True}, timeout=4.0)
+            c_res = await session.transport.call("mediapool.clips", {"recursive": True}, timeout=12.0)
             for c in c_res.get("clips") or []:
                 fp_str = str(c.get("file_path") or "")
                 dig = load_clip_digest(cache_root, fp_str) if fp_str else None
@@ -90,7 +108,7 @@ async def api_resolve_state(st: StateDep) -> dict[str, Any]:
                     }
                 )
         if status.get("timeline"):
-            tl_state = await session.transport.call("timeline.get_state", timeout=4.0)
+            tl_state = await session.transport.call("timeline.get_state", timeout=12.0)
         return {
             "connected": True,
             "status": status,
@@ -107,6 +125,13 @@ async def api_resolve_state(st: StateDep) -> dict[str, Any]:
                 for c in session.journal.resolve_checkpoints
             ],
         }
+    except TimeoutError as err:
+        return {
+            "connected": True,
+            "busy": True,
+            "mode": session.transport.mode,
+            "error": str(err),
+        }
     except Exception as err:  # noqa: BLE001
         return {"connected": False, "error": str(err)}
 
@@ -118,6 +143,9 @@ async def api_resolve_reconnect(req: Request, st: StateDep) -> JSONResponse:
         res = await st.session.reconnect_resolve(body.get("mode"))
         return JSONResponse({"ok": True, "status": res})
     except Exception as err:  # noqa: BLE001
+        st.session.bus.publish(
+            "resolve-changed", {"connected": False, "mode": None, "error": str(err)}
+        )
         return JSONResponse({"ok": False, "error": str(err)}, status_code=400)
 
 

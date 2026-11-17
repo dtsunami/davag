@@ -1,41 +1,50 @@
-# Code-Based Motion Overlays (JS / CSS / SVG / Canvas -> DaVinci Resolve)
+# Code-Based Motion Overlays (Dual-Path V8/Rust & Parallel CDP -> DaVinci Resolve)
 
-`davag` lets the AI agent (or you) author **rich, resolution-independent data visualizations, callouts, lower-thirds, token counters, QR cards, and animated diagrams** in standard HTML, CSS, SVG, and JavaScript, and drop them straight onto an unobstructed **Overlay track (`Video 2+`)** over your DaVinci Resolve timeline with **lossless straight alpha transparency**.
+`davag` lets the AI agent (or you) author **rich, resolution-independent data visualizations, callouts, lower-thirds, token counters, QR cards, and animated diagrams** in standard HTML, CSS, SVG, Canvas, and JavaScript, and drop them straight onto an unobstructed **Overlay track (`Video 2+`)** over your DaVinci Resolve timeline with **lossless Straight Alpha transparency**.
 
-## Why Deterministic CDP -> QuickTime PNG `.mov` (with Optional ProRes 4444)?
+## Dual-Path Rendering Engine (`backend: "auto" | "native" | "cdp"`)
 
-1. **Zero dropped frames:** Unlike screen-recording a browser in real time, `motion.render_overlay` steps a virtual clock frame-by-frame (`f = 0 .. N-1`) over local Headless Chrome/Edge DevTools Protocol (`aiohttp` WebSocket — zero extra dependencies).
-2. **Full Web Graphics Stack:** Every CSS3 glassmorphism filter, custom typography, inline `<svg>` path morph, HTML5 `<canvas>` chart, Web Animations API timeline, or JS function works identically.
-3. **Lightweight Lossless Alpha by Default (`codec: "png"`):** Chrome CDP already emits DEFLATE-compressed RGBA PNG frames where transparent canvas space compresses to near-zero bytes. `davag` muxes those PNG frames directly into `.mov` (`ffmpeg -c:v copy` — zero CPU re-encode, **~10×–25× smaller** than ProRes on sparse callouts/QR cards, native to DaVinci Resolve Free & Studio), matched to your open project's resolution and FPS. Pass `"codec": "prores"` whenever you want 10-bit `prores_ks -profile:v 4444 -pix_fmt yuva444p10le`.
-4. **Native Lottie `.json` & Future Bounding-Box Crop:** DaVinci Resolve 21.1+ also imports vector Lottie `.json` animations natively via `mediapool.import` + `timeline.append_clips`. *(Planned next step: automatic DOM bounding-box `clip` crop + Resolve `Pan`/`Tilt` placement to avoid rasterizing empty full-frame canvas space altogether.)*
+`motion.render_overlay` and `motion.qr_callout` automatically select the fastest deterministic renderer for each overlay (`backend: "auto"`):
+
+1. **`native_v8_resvg` (Pure `<svg>` + optional JS `window.renderFrame`):**
+   - Evaluates all frames in a single lightweight Node.js V8 batch (or zero-subprocess direct path for static `<svg>`) and rasterizes SVG XML across all CPU cores using Rust `resvg` SIMD (`pip install -e ".[motion]"` -> `resvg-py`).
+2. **`native_node_canvas` (Pure `<canvas>` + JS `window.renderFrame`):**
+   - Evaluates 2D Canvas animations in Node.js V8 via `@napi-rs/canvas` and streams raw RGBA buffers straight into FFmpeg with zero PNG encode/decode intermediate overhead.
+3. **`cdp_parallel` (Full HTML / CSS3 / SVG / SMIL / Web Animations fallback — zero extra pip dependencies):**
+   - **Persistent Warm Chromium Daemon:** Keeps a headless Chrome/Edge daemon warm across renders so subsequent overlays skip the 600ms browser cold-start penalty.
+   - **`<4ms` Dynamic Bounding-Box `auto_clip` + FFmpeg `pad`:** Probes key animation timestamps (`box-shadow`, `filter: drop-shadow/blur`, SVG strokes, CSS transforms) to compute the union active bounding rect (`clip`), reading back up to **10×–40× fewer pixels** from Chromium while FFmpeg `pad` restores the exact transparent `width × height` timeline canvas.
+   - **Multi-Tab Worker Pool (`eff_workers`):** Steps frame chunks concurrently across multiple CDP tabs and pipes ordered frames directly into FFmpeg.
+
+## Supported Transparent Codecs (`codec: "png" | "qtrle" | "prores"`) & Straight Alpha
+
+- **`"png"` (Default — QuickTime PNG RGBA `.mov`):** Lossless DEFLATE-compressed 32-bit RGBA `.mov` (~10×–25× smaller than ProRes on sparse UI/callouts). `davag` patches the QuickTime `stsd` sample entry to `depth = 32` (`_ensure_mov_png_rgba_depth32`) and sets `SetClipProperty("Alpha mode", "Straight")` via `mediapool.import` so DaVinci Resolve Free & Studio composite transparency cleanly with zero dark fringes.
+- **`"qtrle"` (QuickTime Animation RLE RGBA `.mov`):** Ultra-fast lossless run-length-encoded 32-bit ARGB `.mov` (`depth = 32`), ideal for flat-color motion graphics and lower-thirds.
+- **`"prores"` (Apple ProRes 4444 10-bit Alpha `.mov`):** `prores_ks -profile:v 4444 -pix_fmt yuva444p10le`, ideal for heavy gradients, film grain, or external grading pipelines.
+- **Static Callout Cards (`"static": true`):** Renders a single 32-bit RGBA `.png`.
 
 ## Authoring Contract (`motion.render_overlay`)
 
-You can animate using **any** of three mechanisms (they can even be combined):
+Always pass multi-line HTML/SVG/JS in a `--davag:NAME--` payload block (`"html": "@overlay1"`), never as an inline `\n`-escaped JSON string! You can animate using any of:
 
-1. **`window.renderFrame(frame, timeSec, durationSec, fps)`** — Deterministic JS hook called before every frame capture (supports `async` promises too!).
-2. **CSS `@keyframes` / Web Animations API** — `davag` automatically pauses and scrubs `document.getAnimations()` to `timeSec * 1000` ms on every frame!
-3. **SVG SMIL (`<animate>`, `<animateTransform>`)** — `davag` scrubs `svg.setCurrentTime(timeSec)` on every frame!
-4. **Static Callout Cards (`"static": true`)** — Renders a single 32-bit RGBA `.png` in `<0.4s` when you don't need motion.
+1. **`window.renderFrame(frame, timeSec, durationSec, fps)`** — Deterministic JS hook called before every frame capture (supports `async` promises).
+2. **CSS `@keyframes` / Web Animations API** — `davag` pauses and scrubs `document.getAnimations()` to `timeSec * 1000` ms on every frame (`cdp_parallel`).
+3. **SVG SMIL (`<animate>`, `<animateTransform>`)** — `davag` scrubs `svg.setCurrentTime(timeSec)` on every frame (`cdp_parallel`).
 
 ### Example `dr_ops` Invocation
 
-```json
+```dr_ops
 {"ops": [
   {
     "op": "motion.render_overlay",
     "name": "credit_burn_callout",
     "duration_sec": 4.0,
+    "codec": "png",
     "record_tc": "01:05:37:28",
     "track_index": 2,
     "html": "@overlay1"
   }
 ]}
-```
-
-With payload `--davag:overlay1--`:
-
-```html
+--davag:overlay1--
 <div id="badge" style="
   position: absolute; right: 96px; top: 96px;
   padding: 28px 40px; border-radius: 18px;
@@ -63,4 +72,5 @@ With payload `--davag:overlay1--`:
     document.getElementById('amt').textContent = `$${(countP * 26.65).toFixed(2)}`;
   };
 </script>
+--davag:end--
 ```
